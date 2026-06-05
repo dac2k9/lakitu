@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/lakitu", "crates/lakitu-mcp"]
+
+# Shared package metadata — inherited by each crate via `*.workspace = true`.
+# NOTE: set `repository` to your real GitHub URL before publishing.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["Johan Larsson"]
+repository = "https://github.com/dac2k9/lakitu"
+
+# Profiles only apply at the workspace root (member profiles are ignored).
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

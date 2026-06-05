@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd keepalive for the lakitu coordination daemon (`lakitu-mcp serve`).
+
+  Install (see deploy/REMOTE.md for the full guide):
+    0. Replace every /Users/YOU below with your home dir, and set the
+       ProgramArguments path to your binary (`which lakitu-mcp`, typically
+       ~/.cargo/bin/lakitu-mcp after `cargo install lakitu-mcp`).
+    1. Edit LAKITU_FLEET_TOKEN below (a shared secret) and LAKITU_FLEET_LISTEN
+       (default loopback-only; see REMOTE.md to expose it over tailscale).
+    2. cp deploy/com.lakitu.daemon.plist ~/Library/LaunchAgents/
+    3. launchctl load -w ~/Library/LaunchAgents/com.lakitu.daemon.plist
+    4. launchctl list | grep lakitu   # confirm it's running (PID, exit 0)
+
+  HOME is set so the daemon resolves the real store at $HOME/.claude/lakitu-fleet
+  (store_root() honors LAKITU_FLEET_ROOT first, then $HOME). KeepAlive restarts
+  it on crash; RunAtLoad starts it at login.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.lakitu.daemon</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/.cargo/bin/lakitu-mcp</string>
+    <string>serve</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/YOU</string>
+    <!-- Loopback by default. To serve remote clients, see REMOTE.md:
+         bind the tailscale IP (e.g. 100.x.y.z:8787) — tailnet-only — rather
+         than 0.0.0.0 (whole LAN, token-gated only). -->
+    <key>LAKITU_FLEET_LISTEN</key>
+    <string>127.0.0.1:8787</string>
+    <!-- Shared bearer token; every client must present it. CHANGE THIS. -->
+    <key>LAKITU_FLEET_TOKEN</key>
+    <string>CHANGE_ME</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Panics / startup errors. Live logs go to $TMPDIR/lakitu-mcp.log (tracing). -->
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/.claude/lakitu-fleet/daemon.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/.claude/lakitu-fleet/daemon.err.log</string>
+</dict>
+</plist>
