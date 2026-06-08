@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::fs;
@@ -37,7 +37,10 @@ static TASK_COUNTER: AtomicU64 = AtomicU64::new(0);
 fn short_id(counter: &AtomicU64) -> String {
     let nanos = chrono::Local::now().timestamp_nanos_opt().unwrap_or(0) as u64;
     let c = counter.fetch_add(1, Ordering::Relaxed);
-    format!("{:06x}", ((nanos >> 8) ^ c.wrapping_mul(2_654_435_761)) & 0xff_ffff)
+    format!(
+        "{:06x}",
+        ((nanos >> 8) ^ c.wrapping_mul(2_654_435_761)) & 0xff_ffff
+    )
 }
 
 /// Serializes tests that mutate the process-global `HOME` (fleet + persona),
@@ -187,7 +190,11 @@ pub async fn register(
     if let Ok(cwd) = std::env::current_dir() {
         obj["path"] = json!(cwd.to_string_lossy());
     }
-    fs::write(dir.join(format!("{name}.json")), serde_json::to_vec_pretty(&obj)?).await?;
+    fs::write(
+        dir.join(format!("{name}.json")),
+        serde_json::to_vec_pretty(&obj)?,
+    )
+    .await?;
     fs::create_dir_all(store_root().join("inbox").join(&name)).await?;
     Ok(name)
 }
@@ -327,7 +334,10 @@ pub async fn heartbeat(name: &str, state: &str, task: Option<&str>) -> Result<St
 pub async fn set_state(name: &str, state: &str) -> Result<()> {
     let name = sanitize(name);
     let dir = store_root().join("agents");
-    if fs::metadata(dir.join(format!("{name}.json"))).await.is_err() {
+    if fs::metadata(dir.join(format!("{name}.json")))
+        .await
+        .is_err()
+    {
         return Ok(()); // not a registered agent → ignore
     }
     let hb_path = dir.join(format!("{name}.heartbeat.json"));
@@ -365,7 +375,9 @@ pub async fn set_state(name: &str, state: &str) -> Result<()> {
 /// Mark an agent offline by removing its heartbeat (SessionEnd → reads offline).
 pub async fn set_offline(name: &str) -> Result<()> {
     let name = sanitize(name);
-    let hb = store_root().join("agents").join(format!("{name}.heartbeat.json"));
+    let hb = store_root()
+        .join("agents")
+        .join(format!("{name}.heartbeat.json"));
     let _ = fs::remove_file(hb).await;
     Ok(())
 }
@@ -417,7 +429,11 @@ pub async fn write_context(
     if let Some(r) = rl7d_reset {
         obj["rl7d_reset"] = json!(r);
     }
-    fs::write(dir.join(format!("{name}.context.json")), serde_json::to_vec(&obj)?).await?;
+    fs::write(
+        dir.join(format!("{name}.context.json")),
+        serde_json::to_vec(&obj)?,
+    )
+    .await?;
     Ok(())
 }
 
@@ -440,7 +456,11 @@ pub async fn register_human(name: &str) -> Result<()> {
         "description": "Supervisor — the human running the cockpit.",
         "started": now_iso(),
     });
-    fs::write(dir.join(format!("{name}.json")), serde_json::to_vec_pretty(&obj)?).await?;
+    fs::write(
+        dir.join(format!("{name}.json")),
+        serde_json::to_vec_pretty(&obj)?,
+    )
+    .await?;
     fs::create_dir_all(store_root().join("inbox").join(&name)).await?;
     Ok(())
 }
@@ -487,7 +507,10 @@ pub async fn delete_message(owner: &str, msg_id: &str) -> Result<()> {
             if p.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
             }
-            if p.file_name().and_then(|s| s.to_str()).map(|f| f.ends_with(&suffix)).unwrap_or(false)
+            if p.file_name()
+                .and_then(|s| s.to_str())
+                .map(|f| f.ends_with(&suffix))
+                .unwrap_or(false)
             {
                 let _ = fs::remove_file(&p).await;
             }
@@ -527,7 +550,11 @@ async fn write_project_list(root: &std::path::Path, projects: &[ProjectDto]) -> 
     fs::create_dir_all(root).await?;
     let path = root.join("projects.json");
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, serde_json::to_vec_pretty(&json!({ "projects": projects }))?).await?;
+    fs::write(
+        &tmp,
+        serde_json::to_vec_pretty(&json!({ "projects": projects }))?,
+    )
+    .await?;
     fs::rename(&tmp, &path).await?;
     Ok(())
 }
@@ -683,9 +710,7 @@ pub async fn send_message(from: &str, to: &str, title: &str, body: &str) -> Resu
     let dir = store_root().join("inbox").join(&to);
     fs::create_dir_all(&dir).await?;
 
-    let nanos = chrono::Local::now()
-        .timestamp_nanos_opt()
-        .unwrap_or(0) as u64;
+    let nanos = chrono::Local::now().timestamp_nanos_opt().unwrap_or(0) as u64;
     let counter = MSG_COUNTER.fetch_add(1, Ordering::Relaxed);
     let id = format!(
         "{:06x}",
@@ -770,7 +795,10 @@ pub async fn notify_supervisor(from: &str, title: &str, body: &str) -> Result<Ve
     let agents = list_agents().await?;
     let mut notified = Vec::new();
     for a in &agents {
-        if a.kind == "human" && a.name != from && send_message(from, &a.name, title, body).await.is_ok() {
+        if a.kind == "human"
+            && a.name != from
+            && send_message(from, &a.name, title, body).await.is_ok()
+        {
             notified.push(a.name.clone());
         }
     }
@@ -885,7 +913,9 @@ pub async fn list_agents() -> Result<Vec<AgentSummary>> {
             continue;
         }
         let stem = fname.trim_end_matches(".json").to_string();
-        let Ok(raw) = fs::read_to_string(&p).await else { continue };
+        let Ok(raw) = fs::read_to_string(&p).await else {
+            continue;
+        };
         let Ok(reg) = serde_json::from_str::<serde_json::Value>(&raw) else {
             continue;
         };
@@ -1090,8 +1120,14 @@ async fn read_inbox_messages(dir: &std::path::Path) -> Vec<crate::wire::MessageD
     read_message_dir(&dir.join("read"), true, &mut msgs).await;
     // Newest first; unparseable/absent times sort last.
     msgs.sort_by(|a, b| {
-        let pa = a.time.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
-        let pb = b.time.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
+        let pa = a
+            .time
+            .as_deref()
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
+        let pb = b
+            .time
+            .as_deref()
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
         pb.cmp(&pa)
     });
     msgs
@@ -1110,7 +1146,9 @@ async fn read_message_dir(
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let Ok(raw) = fs::read_to_string(&path).await else { continue };
+        let Ok(raw) = fs::read_to_string(&path).await else {
+            continue;
+        };
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
             out.push(crate::wire::MessageDto {
                 id: v["id"].as_str().unwrap_or("").to_string(),
@@ -1142,7 +1180,11 @@ async fn read_projects(root: &std::path::Path) -> Vec<crate::wire::ProjectDto> {
                     coordinator: p["coordinator"].as_str().map(String::from),
                     members: p["members"]
                         .as_array()
-                        .map(|m| m.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                        .map(|m| {
+                            m.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
                         .unwrap_or_default(),
                 })
                 .collect()
@@ -1158,7 +1200,10 @@ fn is_stale(kind: &str, last_seen: Option<chrono::DateTime<chrono::FixedOffset>>
     }
     match last_seen {
         Some(ts) => {
-            chrono::Local::now().fixed_offset().signed_duration_since(ts).num_minutes()
+            chrono::Local::now()
+                .fixed_offset()
+                .signed_duration_since(ts)
+                .num_minutes()
                 > STALE_AFTER_MINUTES
         }
         None => true,
@@ -1186,7 +1231,10 @@ mod tests {
         // path component — no separators, never `.`/`..`.
         let evil = sanitize("../../etc/passwd");
         assert!(!evil.contains('/'), "no path separators: {evil}");
-        assert!(evil != "." && evil != "..", "not a traversal component: {evil}");
+        assert!(
+            evil != "." && evil != "..",
+            "not a traversal component: {evil}"
+        );
         assert_eq!(sanitize(".."), "unnamed");
         assert_eq!(sanitize(""), "unnamed");
         assert_eq!(sanitize("vscode-bot"), "vscode-bot");
@@ -1239,8 +1287,12 @@ mod tests {
         )
         .await
         .unwrap();
-        heartbeat("alice", "working", Some("issue #90")).await.unwrap();
-        let id = send_message("bob", "alice", "hello", "need a thing").await.unwrap();
+        heartbeat("alice", "working", Some("issue #90"))
+            .await
+            .unwrap();
+        let id = send_message("bob", "alice", "hello", "need a thing")
+            .await
+            .unwrap();
         assert_eq!(id.len(), 6);
 
         // Sidecar files sitting next to the registry must NOT be read as agents
@@ -1283,9 +1335,14 @@ mod tests {
 
         // notify_supervisor finds the human client and recaps to them.
         let agents_dir = home.join(".claude/lakitu-fleet/agents");
-        std::fs::write(agents_dir.join("you.json"), r#"{"name":"you","kind":"human"}"#)
+        std::fs::write(
+            agents_dir.join("you.json"),
+            r#"{"name":"you","kind":"human"}"#,
+        )
+        .unwrap();
+        let notified = notify_supervisor("alice", "recap", "shipped the fix")
+            .await
             .unwrap();
-        let notified = notify_supervisor("alice", "recap", "shipped the fix").await.unwrap();
         assert_eq!(notified, vec!["you".to_string()]);
         let sup_inbox = read_inbox("you", false).await.unwrap();
         assert_eq!(sup_inbox.len(), 1);
@@ -1296,18 +1353,29 @@ mod tests {
         // the old entry; refuses a taken name.
         rename_agent("alice", "alice-2").await.unwrap();
         let agents = list_agents().await.unwrap();
-        assert!(agents.iter().any(|a| a.name == "alice-2"), "renamed entry present");
+        assert!(
+            agents.iter().any(|a| a.name == "alice-2"),
+            "renamed entry present"
+        );
         assert!(!agents.iter().any(|a| a.name == "alice"), "old entry gone");
         assert!(
-            home.join(".claude/lakitu-fleet/inbox/alice-2/read").exists(),
+            home.join(".claude/lakitu-fleet/inbox/alice-2/read")
+                .exists(),
             "read archive moved with the rename"
         );
-        assert!(rename_agent("alice-2", "you").await.is_err(), "won't clobber an existing name");
+        assert!(
+            rename_agent("alice-2", "you").await.is_err(),
+            "won't clobber an existing name"
+        );
 
         // deregister removes it entirely.
         deregister_agent("alice-2").await.unwrap();
         assert!(
-            !list_agents().await.unwrap().iter().any(|a| a.name == "alice-2"),
+            !list_agents()
+                .await
+                .unwrap()
+                .iter()
+                .any(|a| a.name == "alice-2"),
             "deregistered entry gone"
         );
 
@@ -1332,7 +1400,9 @@ mod tests {
         assert!(read_tasks("aria").await.is_empty());
 
         // Add a loose task and a PR-linked one (with a body + message provenance).
-        let t1 = add_task("aria", "  reply to samus  ", None, None, None).await.unwrap();
+        let t1 = add_task("aria", "  reply to samus  ", None, None, None)
+            .await
+            .unwrap();
         assert_eq!(t1.text, "reply to samus", "text is trimmed");
         assert_eq!(t1.id.len(), 6);
         assert!(t1.body.is_none());
@@ -1340,7 +1410,10 @@ mod tests {
             "aria",
             "update the changelog",
             Some("  cover the dedup fix and the new flag  ".into()),
-            Some(TaskPr { repo: "acme/lakitu".into(), number: 12 }),
+            Some(TaskPr {
+                repo: "acme/lakitu".into(),
+                number: 12,
+            }),
             Some("9a8b7c".into()),
         )
         .await
@@ -1351,13 +1424,20 @@ mod tests {
         assert!(tasks.iter().all(|t| !t.done), "new tasks start open");
         assert_eq!(tasks[1].pr.as_ref().unwrap().number, 12);
         assert_eq!(tasks[1].from_msg.as_deref(), Some("9a8b7c"));
-        assert_eq!(tasks[1].body.as_deref(), Some("cover the dedup fix and the new flag"), "body trimmed + stored");
+        assert_eq!(
+            tasks[1].body.as_deref(),
+            Some("cover the dedup fix and the new flag"),
+            "body trimmed + stored"
+        );
 
         // Complete one; it stays in the list, now done.
         assert!(set_task_done("aria", &t1.id, true).await.unwrap());
         let tasks = read_tasks("aria").await;
         assert_eq!(tasks.iter().filter(|t| t.done).count(), 1);
-        assert!(!set_task_done("aria", "nope", true).await.unwrap(), "unknown id ⇒ false");
+        assert!(
+            !set_task_done("aria", "nope", true).await.unwrap(),
+            "unknown id ⇒ false"
+        );
 
         // Tasks surface in the snapshot under the agent's name.
         let snap = snapshot().await;
@@ -1366,7 +1446,10 @@ mod tests {
 
         // Drop removes it.
         assert!(drop_task("aria", &t2.id).await.unwrap());
-        assert!(!drop_task("aria", &t2.id).await.unwrap(), "second drop ⇒ false");
+        assert!(
+            !drop_task("aria", &t2.id).await.unwrap(),
+            "second drop ⇒ false"
+        );
         assert_eq!(read_tasks("aria").await.len(), 1);
 
         let _ = std::fs::remove_dir_all(&home);

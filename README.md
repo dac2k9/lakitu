@@ -1,5 +1,9 @@
 # Lakitu
 
+[![CI](https://github.com/dac2k9/lakitu/actions/workflows/ci.yml/badge.svg)](https://github.com/dac2k9/lakitu/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/lakitu.svg)](https://crates.io/crates/lakitu)
+[![license](https://img.shields.io/crates/l/lakitu.svg)](#license)
+
 **A live cockpit for a fleet of coordinating [Claude Code](https://claude.com/claude-code) agents.**
 
 When you run several Claude Code agents in parallel — across repos, even across

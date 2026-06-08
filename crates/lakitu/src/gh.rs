@@ -41,7 +41,9 @@ pub struct MetaUpdate {
 /// decide whether an agent's role is a clickable link (don't link a 404). A
 /// `gh` failure / 404 / missing-gh all read as "no" — best-effort, see module doc.
 pub async fn repo_exists(repo: &str) -> bool {
-    run_gh(&["api", &format!("repos/{repo}"), "--silent"]).await.is_some()
+    run_gh(&["api", &format!("repos/{repo}"), "--silent"])
+        .await
+        .is_some()
 }
 
 /// Fetch metadata for an issue. Owner+name in `repo` (`acme/web`).
@@ -184,7 +186,10 @@ mod tests {
     #[test]
     fn pluck_escaped_quote() {
         let json = r#"{"title":"say \"hi\""}"#;
-        assert_eq!(pluck_string(json, "\"title\":").as_deref(), Some("say \"hi\""));
+        assert_eq!(
+            pluck_string(json, "\"title\":").as_deref(),
+            Some("say \"hi\"")
+        );
     }
 
     #[test]

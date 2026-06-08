@@ -57,7 +57,11 @@ pub async fn session_context(name: &str) -> Option<String> {
             if p.extension().and_then(|s| s.to_str()) != Some("md") {
                 continue;
             }
-            let peer = p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            let peer = p
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
             if let Ok(body) = fs::read_to_string(&p).await {
                 let body = body.trim().to_string();
                 if !body.is_empty() {
@@ -154,7 +158,11 @@ pub async fn set_identity(name: &str, tagline: Option<&str>, bio: Option<&str>) 
     doc["updated"] = json!(now_iso());
 
     write_atomic(&json_path, &serde_json::to_vec_pretty(&doc)?).await?;
-    write_atomic(&dir.join("identity.md"), render_identity_md(&doc).as_bytes()).await?;
+    write_atomic(
+        &dir.join("identity.md"),
+        render_identity_md(&doc).as_bytes(),
+    )
+    .await?;
     Ok(safe)
 }
 
@@ -274,7 +282,9 @@ mod tests {
     #[allow(clippy::await_holding_lock)] // _env guard intentionally held across .await
     async fn identity_merges_and_peers_accumulate() {
         // Serialize against the other HOME-mutating tests (see fleet::TEST_ENV_LOCK).
-        let _env = crate::fleet::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::fleet::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = std::env::temp_dir().join(format!("persona-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
@@ -296,7 +306,10 @@ mod tests {
             .unwrap();
         let card = get_identity("samus").await.unwrap().unwrap();
         assert!(card.contains("refactor-first"), "tagline updated");
-        assert!(card.contains("methodical, terse"), "bio preserved on partial update");
+        assert!(
+            card.contains("methodical, terse"),
+            "bio preserved on partial update"
+        );
 
         // Peer notes accumulate (append-only) and round-trip via recall.
         remember_peer("samus", "protoman", "great on CI", Some(3))
@@ -317,10 +330,19 @@ mod tests {
             .await
             .unwrap();
         rename_persona("samus", "aran").await;
-        assert!(get_identity("samus").await.unwrap().is_none(), "old name gone");
-        assert!(get_identity("aran").await.unwrap().is_some(), "persona moved");
+        assert!(
+            get_identity("samus").await.unwrap().is_none(),
+            "old name gone"
+        );
+        assert!(
+            get_identity("aran").await.unwrap().is_some(),
+            "persona moved"
+        );
         let nucleus_peers = recall_peers("nucleus").await.unwrap();
-        assert_eq!(nucleus_peers[0].0, "aran", "peer note about samus follows the rename");
+        assert_eq!(
+            nucleus_peers[0].0, "aran",
+            "peer note about samus follows the rename"
+        );
 
         let _ = std::fs::remove_dir_all(&home);
     }

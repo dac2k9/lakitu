@@ -29,9 +29,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rmcp::{
+    ErrorData as McpError, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
-    schemars, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler,
+    schemars, tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
 use tokio::sync::RwLock;
@@ -62,16 +63,21 @@ fn default_owner() -> Option<String> {
 /// Board to use when a repo has no linked Project v2: `LAKITU_DEFAULT_BOARD`
 /// ("owner/number") if set, else the repo's own owner with project #1.
 fn board_fallback(repo_slug: &str) -> BoardCoords {
-    if let Some((owner, num)) =
-        std::env::var("LAKITU_DEFAULT_BOARD").ok().and_then(|v| {
-            v.split_once('/').and_then(|(o, n)| {
-                n.parse::<u32>().ok().filter(|_| !o.is_empty()).map(|n| (o.to_string(), n))
-            })
+    if let Some((owner, num)) = std::env::var("LAKITU_DEFAULT_BOARD").ok().and_then(|v| {
+        v.split_once('/').and_then(|(o, n)| {
+            n.parse::<u32>()
+                .ok()
+                .filter(|_| !o.is_empty())
+                .map(|n| (o.to_string(), n))
         })
-    {
+    }) {
         return BoardCoords { owner, number: num };
     }
-    let owner = repo_slug.split_once('/').map(|(o, _)| o).unwrap_or("").to_string();
+    let owner = repo_slug
+        .split_once('/')
+        .map(|(o, _)| o)
+        .unwrap_or("")
+        .to_string();
     BoardCoords { owner, number: 1 }
 }
 
@@ -95,7 +101,11 @@ fn normalize_repo_slug(opt: Option<&str>) -> String {
 /// Tracks `normalize_repo_slug` so both are derived from the same input.
 fn normalize_repo_name(opt: Option<&str>) -> String {
     match opt {
-        None => default_repo_slug().rsplit('/').next().unwrap_or("").to_string(),
+        None => default_repo_slug()
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .to_string(),
         Some(s) => s.rsplit('/').next().unwrap_or(s).to_string(),
     }
 }
@@ -109,14 +119,7 @@ fn normalize_repo_name(opt: Option<&str>) -> String {
 /// number (e.g. `feat/matchedby-remote-ranges`), and they're still
 /// agent-authored. The footer check (`AGENT_FOOTER`) gates against
 /// human-opened PRs that happen to use these prefixes.
-const AGENT_BRANCH_PREFIXES: &[&str] = &[
-    "fix/",
-    "feat/",
-    "chore/",
-    "docs/",
-    "test/",
-    "refactor/",
-];
+const AGENT_BRANCH_PREFIXES: &[&str] = &["fix/", "feat/", "chore/", "docs/", "test/", "refactor/"];
 
 /// Literal footer the agent appends to every PR body it opens (via the
 /// loop's PR template). Paired with the branch-prefix check, both must
@@ -440,7 +443,9 @@ impl AgentBoardService {
         if matches!(
             req.reason,
             BlockerReason::AssetNeeded | BlockerReason::ExternalInput
-        ) && !has_blocker_comment(req.issue, &repo_slug).await.unwrap_or(false)
+        ) && !has_blocker_comment(req.issue, &repo_slug)
+            .await
+            .unwrap_or(false)
         {
             let mention = req
                 .unblocker_handle
@@ -644,9 +649,21 @@ impl AgentBoardService {
                 // slug in the repo column lets the cockpit attribute it to
                 // the owning client.
                 if !logged.contains(&(repo_slug.clone(), *number)) {
-                    let _ = append_audit_log("board-sweep", "pr-opened", repo_slug, &format!("pr=#{number}")).await;
+                    let _ = append_audit_log(
+                        "board-sweep",
+                        "pr-opened",
+                        repo_slug,
+                        &format!("pr=#{number}"),
+                    )
+                    .await;
                     if !is_draft {
-                        let _ = append_audit_log("board-sweep", "ready-flipped", repo_slug, &format!("pr=#{number}")).await;
+                        let _ = append_audit_log(
+                            "board-sweep",
+                            "ready-flipped",
+                            repo_slug,
+                            &format!("pr=#{number}"),
+                        )
+                        .await;
                     }
                     emitted += 1;
                 }
@@ -747,14 +764,7 @@ impl AgentBoardService {
         let repo_slug = normalize_repo_slug(req.repo.as_deref());
         let repo_name = normalize_repo_name(req.repo.as_deref());
 
-        run_gh(&[
-            "pr",
-            "ready",
-            &req.pr.to_string(),
-            "--repo",
-            &repo_slug,
-        ])
-        .await?;
+        run_gh(&["pr", "ready", &req.pr.to_string(), "--repo", &repo_slug]).await?;
 
         let mut d = HashMap::new();
         d.insert("pr".to_string(), format!("#{}", req.pr));
@@ -768,7 +778,10 @@ impl AgentBoardService {
         .await
         .map_err(mcp)?;
 
-        Ok(text(format!("Marked #{} ready (supervisor-delegated)", req.pr)))
+        Ok(text(format!(
+            "Marked #{} ready (supervisor-delegated)",
+            req.pr
+        )))
     }
 
     #[tool(
@@ -790,14 +803,7 @@ impl AgentBoardService {
         // 1. Create the issue. `gh issue create` prints the URL on stdout
         // on success.
         let url_stdout = run_gh(&[
-            "issue",
-            "create",
-            "--repo",
-            &repo_slug,
-            "--title",
-            &req.title,
-            "--body",
-            &req.body,
+            "issue", "create", "--repo", &repo_slug, "--title", &req.title, "--body", &req.body,
         ])
         .await?;
         let url = url_stdout.trim();
@@ -805,7 +811,11 @@ impl AgentBoardService {
             .rsplit('/')
             .next()
             .and_then(|s| s.parse::<u64>().ok())
-            .ok_or_else(|| mcp(format!("could not parse issue number from `gh` output: {url:?}")))?;
+            .ok_or_else(|| {
+                mcp(format!(
+                    "could not parse issue number from `gh` output: {url:?}"
+                ))
+            })?;
 
         // 2. Add to the repo's board (auto-discovered from the repo it was
         // filed in).
@@ -853,11 +863,8 @@ impl AgentBoardService {
     ) -> Result<CallToolResult, McpError> {
         let id = req.comment_id;
         let repo_slug = normalize_repo_slug(req.repo.as_deref());
-        if let Ok(json) = run_gh(&[
-            "api",
-            &format!("repos/{}/pulls/comments/{}", repo_slug, id),
-        ])
-        .await
+        if let Ok(json) =
+            run_gh(&["api", &format!("repos/{}/pulls/comments/{}", repo_slug, id)]).await
         {
             let v: serde_json::Value = serde_json::from_str(&json).map_err(mcp)?;
             if let Some(body) = v["body"].as_str() {
@@ -913,7 +920,10 @@ impl AgentBoardService {
         .map_err(mcp)?;
         Ok(text(format!(
             "Registered agent '{name}'{} (repo={}, board={}){}",
-            req.role.as_deref().map(|r| format!(" [{r}]")).unwrap_or_default(),
+            req.role
+                .as_deref()
+                .map(|r| format!(" [{r}]"))
+                .unwrap_or_default(),
             req.repo,
             req.board,
             req.description
@@ -954,7 +964,9 @@ impl AgentBoardService {
         Parameters(req): Parameters<DeregisterAgentRequest>,
     ) -> Result<CallToolResult, McpError> {
         let name = fleet::deregister_agent(&req.name).await.map_err(mcp)?;
-        Ok(text(format!("Deregistered '{name}' (registry + inbox removed)")))
+        Ok(text(format!(
+            "Deregistered '{name}' (registry + inbox removed)"
+        )))
     }
 
     #[tool(
@@ -1040,7 +1052,11 @@ impl AgentBoardService {
             "({} message{}{})",
             msgs.len(),
             if msgs.len() == 1 { "" } else { "s" },
-            if mark { " — moved to read archive" } else { " — left unread" },
+            if mark {
+                " — moved to read archive"
+            } else {
+                " — left unread"
+            },
         ));
         Ok(text(out))
     }
@@ -1138,7 +1154,11 @@ impl AgentBoardService {
                 "No supervisor registered (no human client) — recap not sent.".to_string(),
             ));
         }
-        Ok(text(format!("Recap '{}' sent to: {}", req.title, names.join(", "))))
+        Ok(text(format!(
+            "Recap '{}' sent to: {}",
+            req.title,
+            names.join(", ")
+        )))
     }
 
     #[tool(
@@ -1299,9 +1319,15 @@ impl AgentBoardService {
             }),
             _ => None,
         };
-        let task = fleet::add_task(&req.name, &req.text, req.body.clone(), pr, req.from_msg.clone())
-            .await
-            .map_err(mcp)?;
+        let task = fleet::add_task(
+            &req.name,
+            &req.text,
+            req.body.clone(),
+            pr,
+            req.from_msg.clone(),
+        )
+        .await
+        .map_err(mcp)?;
         let pr_note = task
             .pr
             .as_ref()
@@ -1327,8 +1353,7 @@ impl AgentBoardService {
     ) -> Result<CallToolResult, McpError> {
         let include_done = req.include_done.unwrap_or(false);
         let all = fleet::read_tasks(&req.name).await;
-        let shown: Vec<&fleet::Task> =
-            all.iter().filter(|t| include_done || !t.done).collect();
+        let shown: Vec<&fleet::Task> = all.iter().filter(|t| include_done || !t.done).collect();
         if shown.is_empty() {
             return Ok(text(format!(
                 "No {}tasks for '{}'.",
@@ -1339,11 +1364,10 @@ impl AgentBoardService {
         let mut out = String::new();
         for t in &shown {
             let check = if t.done { "[x]" } else { "[ ]" };
-            let pr = t
-                .pr
-                .as_ref()
-                .map(|p| format!("  ({}#{})", p.repo, p.number))
-                .unwrap_or_default();
+            let pr =
+                t.pr.as_ref()
+                    .map(|p| format!("  ({}#{})", p.repo, p.number))
+                    .unwrap_or_default();
             let from = t
                 .from_msg
                 .as_ref()
@@ -1377,7 +1401,11 @@ impl AgentBoardService {
         Ok(text(if ok {
             format!("Completed task {}.", req.id)
         } else {
-            format!("No task {} found for '{}'.", req.id, fleet::sanitize(&req.name))
+            format!(
+                "No task {} found for '{}'.",
+                req.id,
+                fleet::sanitize(&req.name)
+            )
         }))
     }
 
@@ -1395,7 +1423,11 @@ impl AgentBoardService {
         Ok(text(if ok {
             format!("Dropped task {}.", req.id)
         } else {
-            format!("No task {} found for '{}'.", req.id, fleet::sanitize(&req.name))
+            format!(
+                "No task {} found for '{}'.",
+                req.id,
+                fleet::sanitize(&req.name)
+            )
         }))
     }
 }
@@ -1433,14 +1465,20 @@ impl ServerHandler for AgentBoardService {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct EmitEventRequest {
-    #[schemars(description = "Skill emitting the event, e.g. 'board-issue-loop' or 'pr-review-fixup'.")]
+    #[schemars(
+        description = "Skill emitting the event, e.g. 'board-issue-loop' or 'pr-review-fixup'."
+    )]
     pub skill: String,
-    #[schemars(description = "Action verb, e.g. 'blocked', 'pr-opened', 'sweep'. See each skill's audit-log table for the vocabulary.")]
+    #[schemars(
+        description = "Action verb, e.g. 'blocked', 'pr-opened', 'sweep'. See each skill's audit-log table for the vocabulary."
+    )]
     pub action: String,
     #[schemars(description = "Repo name without owner — e.g. 'web'. Defaults to 'web'.")]
     #[serde(default)]
     pub repo: Option<String>,
-    #[schemars(description = "Free-form key/value pairs. Renders as space-separated 'k=v' in the log; keys 'issue', 'reason', 'detail' sort first for readability.")]
+    #[schemars(
+        description = "Free-form key/value pairs. Renders as space-separated 'k=v' in the log; keys 'issue', 'reason', 'detail' sort first for readability."
+    )]
     #[serde(default)]
     pub details: HashMap<String, String>,
 }
@@ -1449,9 +1487,13 @@ pub struct EmitEventRequest {
 pub struct MoveCardRequest {
     #[schemars(description = "Issue number (the bare integer, e.g. 90).")]
     pub issue: u64,
-    #[schemars(description = "Status name on the project board. Must be one of: Todo, In Progress, Done.")]
+    #[schemars(
+        description = "Status name on the project board. Must be one of: Todo, In Progress, Done."
+    )]
     pub status: String,
-    #[schemars(description = "Optional repo the issue lives in. Bare name or 'owner/repo'. Selects the board (the Project v2 linked to that repo; falls back to acme/#14). Defaults to 'acme/web'.")]
+    #[schemars(
+        description = "Optional repo the issue lives in. Bare name or 'owner/repo'. Selects the board (the Project v2 linked to that repo; falls back to acme/#14). Defaults to 'acme/web'."
+    )]
     #[serde(default)]
     pub repo: Option<String>,
 }
@@ -1460,11 +1502,15 @@ pub struct MoveCardRequest {
 pub struct SetBlockerRequest {
     #[schemars(description = "Issue number.")]
     pub issue: u64,
-    #[schemars(description = "Reason for the block. See the board-issue-loop skill for what each one means.")]
+    #[schemars(
+        description = "Reason for the block. See the board-issue-loop skill for what each one means."
+    )]
     pub reason: BlockerReason,
     #[schemars(description = "Short free-form detail, e.g. 'svg-from-jon' or 'v1.0-cut-pending'.")]
     pub detail: String,
-    #[schemars(description = "GitHub username to @-mention in the issue comment (only used for asset-needed and external-input). Omit to skip the mention.")]
+    #[schemars(
+        description = "GitHub username to @-mention in the issue comment (only used for asset-needed and external-input). Omit to skip the mention."
+    )]
     #[serde(default)]
     pub unblocker_handle: Option<String>,
     #[schemars(description = "Optional repo. Bare name or 'owner/repo'. Defaults to 'acme/web'.")]
@@ -1486,7 +1532,9 @@ pub struct SweepAgentPrsRequest {
     // v0.1 took no parameters. `repo` added in v0.2 so a caller can
     // sweep PRs in api / other sibling repos. Default keeps the
     // skill-documented behaviour (web).
-    #[schemars(description = "Optional repo to sweep. Accepts a bare name (e.g. 'api', assumed under 'acme') or full 'owner/repo'. Defaults to 'acme/web'.")]
+    #[schemars(
+        description = "Optional repo to sweep. Accepts a bare name (e.g. 'api', assumed under 'acme') or full 'owner/repo'. Defaults to 'acme/web'."
+    )]
     #[serde(default)]
     pub repo: Option<String>,
 }
@@ -1502,7 +1550,9 @@ pub struct CommentThreadsRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CommentBodyRequest {
-    #[schemars(description = "Comment id as returned by `comment_threads`. Inline and top-level comments use different ID namespaces; this tool tries both.")]
+    #[schemars(
+        description = "Comment id as returned by `comment_threads`. Inline and top-level comments use different ID namespaces; this tool tries both."
+    )]
     pub comment_id: u64,
     #[schemars(description = "Optional repo. Bare name or 'owner/repo'. Defaults to 'acme/web'.")]
     #[serde(default)]
@@ -1513,7 +1563,9 @@ pub struct CommentBodyRequest {
 pub struct MarkReadyRequest {
     #[schemars(description = "PR number to flip from draft to ready-for-review.")]
     pub pr: u64,
-    #[schemars(description = "MUST be true: this tool refuses unless the supervisor has explicitly delegated the ready-flip. Encodes the skill's `agent never flips on its own initiative` rule at the call site.")]
+    #[schemars(
+        description = "MUST be true: this tool refuses unless the supervisor has explicitly delegated the ready-flip. Encodes the skill's `agent never flips on its own initiative` rule at the call site."
+    )]
     pub by_supervisor: bool,
     #[schemars(description = "Optional repo. Bare name or 'owner/repo'. Defaults to 'acme/web'.")]
     #[serde(default)]
@@ -1522,29 +1574,43 @@ pub struct MarkReadyRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct FileFollowupIssueRequest {
-    #[schemars(description = "PR the follow-up was surfaced from (for audit log + traceability). Bare number.")]
+    #[schemars(
+        description = "PR the follow-up was surfaced from (for audit log + traceability). Bare number."
+    )]
     pub parent_pr: u64,
     #[schemars(description = "Issue title — short imperative summary of the observation.")]
     pub title: String,
-    #[schemars(description = "Issue body. Convention is to lead with `Surfaced as a follow-up from #<PR>.` so the connection is visible on the issue page itself.")]
+    #[schemars(
+        description = "Issue body. Convention is to lead with `Surfaced as a follow-up from #<PR>.` so the connection is visible on the issue page itself."
+    )]
     pub body: String,
-    #[schemars(description = "Optional repo to file the follow-up issue in. Bare name or 'owner/repo'. Defaults to 'acme/web'. The follow-up lands on that repo's board (its linked Project v2; falls back to acme/#14).")]
+    #[schemars(
+        description = "Optional repo to file the follow-up issue in. Bare name or 'owner/repo'. Defaults to 'acme/web'. The follow-up lands on that repo's board (its linked Project v2; falls back to acme/#14)."
+    )]
     #[serde(default)]
     pub repo: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RegisterAgentRequest {
-    #[schemars(description = "Stable agent handle, kebab-case (e.g. 'vscode-bot'). Becomes the file/inbox name; non-path-safe characters are replaced with '-'.")]
+    #[schemars(
+        description = "Stable agent handle, kebab-case (e.g. 'vscode-bot'). Becomes the file/inbox name; non-path-safe characters are replaced with '-'."
+    )]
     pub name: String,
     #[schemars(description = "Repo this agent works, free-form label (e.g. 'acme/web').")]
     pub repo: String,
-    #[schemars(description = "Git board this agent is connected to. Convention: '<owner>/<projectNumber>' (e.g. 'acme/14').")]
+    #[schemars(
+        description = "Git board this agent is connected to. Convention: '<owner>/<projectNumber>' (e.g. 'acme/14')."
+    )]
     pub board: String,
-    #[schemars(description = "Optional short function label, 1-3 words (e.g. 'code review', 'scan backend', 'VS Code UI', 'supervisor'). Distinct from the name: the name is identity/address, the role is what you do. Shown as a chip in the cockpit and in list_agents so peers can route by capability.")]
+    #[schemars(
+        description = "Optional short function label, 1-3 words (e.g. 'code review', 'scan backend', 'VS Code UI', 'supervisor'). Distinct from the name: the name is identity/address, the role is what you do. Shown as a chip in the cockpit and in list_agents so peers can route by capability."
+    )]
     #[serde(default)]
     pub role: Option<String>,
-    #[schemars(description = "Optional one-line capability blurb: what this agent is for and what peers can ask it to do (e.g. 'api backend — ask me to expose MCP tools or adjust scan schemas'). This is what other agents read in list_agents to decide who to message. Stable identity, distinct from the transient heartbeat task.")]
+    #[schemars(
+        description = "Optional one-line capability blurb: what this agent is for and what peers can ask it to do (e.g. 'api backend — ask me to expose MCP tools or adjust scan schemas'). This is what other agents read in list_agents to decide who to message. Stable identity, distinct from the transient heartbeat task."
+    )]
     #[serde(default)]
     pub description: Option<String>,
 }
@@ -1569,7 +1635,9 @@ pub struct HeartbeatRequest {
     pub name: String,
     #[schemars(description = "Current state.")]
     pub state: AgentStateArg,
-    #[schemars(description = "Optional one-line description of the current task, e.g. 'issue #90: fix watcher leak'.")]
+    #[schemars(
+        description = "Optional one-line description of the current task, e.g. 'issue #90: fix watcher leak'."
+    )]
     #[serde(default)]
     pub task: Option<String>,
 }
@@ -1582,7 +1650,9 @@ pub struct SendMessageRequest {
     pub to: String,
     #[schemars(description = "Short subject line.")]
     pub title: String,
-    #[schemars(description = "Full message body. Can be a feature request, question, or coordination note.")]
+    #[schemars(
+        description = "Full message body. Can be a feature request, question, or coordination note."
+    )]
     pub body: String,
 }
 
@@ -1590,7 +1660,9 @@ pub struct SendMessageRequest {
 pub struct ReadInboxRequest {
     #[schemars(description = "The agent's own name whose inbox to read.")]
     pub name: String,
-    #[schemars(description = "If true (default), returned messages are archived to read/ so they aren't seen again. Pass false to peek without consuming.")]
+    #[schemars(
+        description = "If true (default), returned messages are archived to read/ so they aren't seen again. Pass false to peek without consuming."
+    )]
     #[serde(default)]
     pub mark_read: Option<bool>,
 }
@@ -1631,19 +1703,25 @@ pub struct ListAgentsRequest {}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SetIdentityRequest {
-    #[schemars(description = "Your own agent name (as registered). The persona is stored under this handle.")]
+    #[schemars(
+        description = "Your own agent name (as registered). The persona is stored under this handle."
+    )]
     pub name: String,
     #[schemars(description = "One-line essence of who you are. Omit to keep the current tagline.")]
     #[serde(default)]
     pub tagline: Option<String>,
-    #[schemars(description = "Freeform markdown: how you work, your voice, what you care about — anything that makes you you. Omit to keep the current bio.")]
+    #[schemars(
+        description = "Freeform markdown: how you work, your voice, what you care about — anything that makes you you. Omit to keep the current bio."
+    )]
     #[serde(default)]
     pub bio: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetIdentityRequest {
-    #[schemars(description = "The agent whose self-card you want to read (a peer's name from list_agents).")]
+    #[schemars(
+        description = "The agent whose self-card you want to read (a peer's name from list_agents)."
+    )]
     pub name: String,
 }
 
@@ -1670,18 +1748,26 @@ pub struct RecallPeersRequest {
 pub struct AddTaskRequest {
     #[schemars(description = "Your own agent name — the task is added to your list.")]
     pub name: String,
-    #[schemars(description = "The reminder title — short and actionable (e.g. 'reply to samus about the schema', 'update the changelog before merging').")]
+    #[schemars(
+        description = "The reminder title — short and actionable (e.g. 'reply to samus about the schema', 'update the changelog before merging')."
+    )]
     pub text: String,
-    #[schemars(description = "Optional longer note/details for the task (the 'message' — shown in the cockpit's task detail). Use it when the title alone isn't enough.")]
+    #[schemars(
+        description = "Optional longer note/details for the task (the 'message' — shown in the cockpit's task detail). Use it when the title alone isn't enough."
+    )]
     #[serde(default)]
     pub body: Option<String>,
-    #[schemars(description = "Optional repo ('owner/name') of a PR this task hangs off. Together with pr_number, the task renders as a subtree of that PR in the cockpit.")]
+    #[schemars(
+        description = "Optional repo ('owner/name') of a PR this task hangs off. Together with pr_number, the task renders as a subtree of that PR in the cockpit."
+    )]
     #[serde(default)]
     pub pr_repo: Option<String>,
     #[schemars(description = "Optional PR number this task hangs off (pair with pr_repo).")]
     #[serde(default)]
     pub pr_number: Option<u64>,
-    #[schemars(description = "Optional id of the inbox message this task was spun off from (provenance) — e.g. a message you couldn't action yet but don't want to lose.")]
+    #[schemars(
+        description = "Optional id of the inbox message this task was spun off from (provenance) — e.g. a message you couldn't action yet but don't want to lose."
+    )]
     #[serde(default)]
     pub from_msg: Option<String>,
 }
@@ -1690,7 +1776,9 @@ pub struct AddTaskRequest {
 pub struct ReadTasksRequest {
     #[schemars(description = "Your own agent name whose task list to read.")]
     pub name: String,
-    #[schemars(description = "If true, include completed tasks too. Default false (open tasks only).")]
+    #[schemars(
+        description = "If true, include completed tasks too. Default false (open tasks only)."
+    )]
     #[serde(default)]
     pub include_done: Option<bool>,
 }
@@ -1882,9 +1970,7 @@ fn format_details(map: &HashMap<String, String>) -> String {
             "detail" => 2,
             _ => 3,
         };
-        rank(a.0)
-            .cmp(&rank(b.0))
-            .then_with(|| a.0.cmp(b.0))
+        rank(a.0).cmp(&rank(b.0)).then_with(|| a.0.cmp(b.0))
     });
     pairs
         .iter()
@@ -2178,7 +2264,10 @@ mod tests {
     fn parse_pr_ref_extracts_number() {
         // Bare and with trailing tokens (real log details shapes).
         assert_eq!(parse_pr_ref("pr=#60"), Some(60));
-        assert_eq!(parse_pr_ref("pr=#52 comment=3288468269 short=foo"), Some(52));
+        assert_eq!(
+            parse_pr_ref("pr=#52 comment=3288468269 short=foo"),
+            Some(52)
+        );
         assert_eq!(parse_pr_ref("pr=#98 issue=#90"), Some(98));
         // No PR ref, or a non-PR ref → None (so dedup ignores the row).
         assert_eq!(parse_pr_ref("issue=#90 reason=release-gate"), None);

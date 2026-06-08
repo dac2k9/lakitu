@@ -161,7 +161,9 @@ impl WorkItems {
             if let Some(mut existing) = self.items.remove(&WorkKey::Pr(pr_n)) {
                 existing.key = WorkKey::Issue(issue_n);
                 existing.issue = Some(issue_n);
-                self.items.entry(WorkKey::Issue(issue_n)).or_insert(existing);
+                self.items
+                    .entry(WorkKey::Issue(issue_n))
+                    .or_insert(existing);
             }
         }
 
@@ -255,7 +257,10 @@ fn identify_targets(ev: &Event, pr_to_issue: &HashMap<u64, u64>) -> (Option<u64>
 }
 
 fn pr_from_event(ev: &Event) -> Option<u64> {
-    ev.refs.iter().find(|r| r.kind == RefKind::Pr).map(|r| r.number)
+    ev.refs
+        .iter()
+        .find(|r| r.kind == RefKind::Pr)
+        .map(|r| r.number)
 }
 
 fn transition(current: WorkState, ev: &Event) -> WorkState {
@@ -321,7 +326,10 @@ fn note_for(ev: &Event, state: WorkState) -> String {
 
 fn extract_key(details: &str, key: &str) -> Option<String> {
     let start = details.find(key)? + key.len();
-    let end = details[start..].find(' ').map(|i| start + i).unwrap_or(details.len());
+    let end = details[start..]
+        .find(' ')
+        .map(|i| start + i)
+        .unwrap_or(details.len());
     Some(details[start..end].to_string())
 }
 
@@ -336,10 +344,18 @@ mod tests {
     #[test]
     fn lifecycle_to_in_review() {
         let mut w = WorkItems::new();
-        w.ingest(&ev("2026-05-10T14:17:01+02:00\tboard-issue-loop\tweb\tpick\tissue=#90"));
-        w.ingest(&ev("2026-05-10T14:17:02+02:00\tboard-issue-loop\tweb\tcard-in-progress\tissue=#90"));
-        w.ingest(&ev("2026-05-10T14:17:03+02:00\tboard-issue-loop\tweb\tbranch\tname=fix/issue-90-x"));
-        w.ingest(&ev("2026-05-10T14:17:04+02:00\tboard-issue-loop\tweb\tpr-opened\tpr=#98 issue=#90"));
+        w.ingest(&ev(
+            "2026-05-10T14:17:01+02:00\tboard-issue-loop\tweb\tpick\tissue=#90",
+        ));
+        w.ingest(&ev(
+            "2026-05-10T14:17:02+02:00\tboard-issue-loop\tweb\tcard-in-progress\tissue=#90",
+        ));
+        w.ingest(&ev(
+            "2026-05-10T14:17:03+02:00\tboard-issue-loop\tweb\tbranch\tname=fix/issue-90-x",
+        ));
+        w.ingest(&ev(
+            "2026-05-10T14:17:04+02:00\tboard-issue-loop\tweb\tpr-opened\tpr=#98 issue=#90",
+        ));
         let items = w.sorted();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].issue, Some(90));
@@ -352,7 +368,9 @@ mod tests {
         // A PR with no linked issue (pr-review-fixup acting on an open PR
         // that has no board ticket). It must still show up as a work item.
         let mut w = WorkItems::new();
-        w.ingest(&ev("2026-05-22T15:00:00+02:00\tpr-review-fixup\tapi\tact-start\tpr=#52"));
+        w.ingest(&ev(
+            "2026-05-22T15:00:00+02:00\tpr-review-fixup\tapi\tact-start\tpr=#52",
+        ));
         let items = w.sorted();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].issue, None, "no board ticket");
@@ -364,10 +382,14 @@ mod tests {
     fn pr_opened_promotes_pr_only_item_to_issue() {
         let mut w = WorkItems::new();
         // PR work seen first with no issue → PR-only item.
-        w.ingest(&ev("2026-05-22T15:00:00+02:00\tpr-review-fixup\tapi\tact-start\tpr=#52"));
+        w.ingest(&ev(
+            "2026-05-22T15:00:00+02:00\tpr-review-fixup\tapi\tact-start\tpr=#52",
+        ));
         assert_eq!(w.sorted().len(), 1);
         // Linkage appears later → fold onto the issue, still a single item.
-        w.ingest(&ev("2026-05-22T15:05:00+02:00\tboard-issue-loop\tapi\tpr-opened\tpr=#52 issue=#40"));
+        w.ingest(&ev(
+            "2026-05-22T15:05:00+02:00\tboard-issue-loop\tapi\tpr-opened\tpr=#52 issue=#40",
+        ));
         let items = w.sorted();
         assert_eq!(items.len(), 1, "promoted, not duplicated");
         assert_eq!(items[0].issue, Some(40));
@@ -378,9 +400,13 @@ mod tests {
     #[test]
     fn pr_only_event_resolves_to_issue() {
         let mut w = WorkItems::new();
-        w.ingest(&ev("2026-05-10T14:17:00+02:00\tboard-issue-loop\tweb\tpr-opened\tpr=#98 issue=#90"));
+        w.ingest(&ev(
+            "2026-05-10T14:17:00+02:00\tboard-issue-loop\tweb\tpr-opened\tpr=#98 issue=#90",
+        ));
         // Subsequent pr-only event should resolve.
-        w.ingest(&ev("2026-05-11T09:30:00+02:00\tpr-review-fixup\tweb\tapplied\tpr=#98 comment=1"));
+        w.ingest(&ev(
+            "2026-05-11T09:30:00+02:00\tpr-review-fixup\tweb\tapplied\tpr=#98 comment=1",
+        ));
         let items = w.sorted();
         assert_eq!(items[0].pr, Some(98));
         assert_eq!(items[0].state, WorkState::InReview);
@@ -389,7 +415,9 @@ mod tests {
     #[test]
     fn waiting_for_input() {
         let mut w = WorkItems::new();
-        w.ingest(&ev("2026-05-10T14:17:00+02:00\tboard-issue-loop\tweb\tpick\tissue=#90"));
+        w.ingest(&ev(
+            "2026-05-10T14:17:00+02:00\tboard-issue-loop\tweb\tpick\tissue=#90",
+        ));
         w.ingest(&ev("2026-05-10T14:17:05+02:00\tboard-issue-loop\tweb\tpause\tissue=#90 reason=scope-too-big"));
         let items = w.sorted();
         assert_eq!(items[0].state, WorkState::WaitingForInput);
@@ -399,7 +427,9 @@ mod tests {
     #[test]
     fn ready_for_merge_after_flip() {
         let mut w = WorkItems::new();
-        w.ingest(&ev("2026-05-10T14:17:00+02:00\tboard-issue-loop\tweb\tpr-opened\tpr=#98 issue=#90"));
+        w.ingest(&ev(
+            "2026-05-10T14:17:00+02:00\tboard-issue-loop\tweb\tpr-opened\tpr=#98 issue=#90",
+        ));
         w.ingest(&ev("2026-05-11T09:30:00+02:00\tpr-review-fixup\tweb\tready-flipped\tpr=#98 by=supervisor-delegated"));
         let items = w.sorted();
         assert_eq!(items[0].state, WorkState::ReadyForMerge);
@@ -408,14 +438,18 @@ mod tests {
     #[test]
     fn blocked_then_unblocked() {
         let mut w = WorkItems::new();
-        w.ingest(&ev("2026-05-11T10:00:00+02:00\tboard-issue-loop\tweb\tpick\tissue=#79"));
+        w.ingest(&ev(
+            "2026-05-11T10:00:00+02:00\tboard-issue-loop\tweb\tpick\tissue=#79",
+        ));
         w.ingest(&ev("2026-05-11T10:01:00+02:00\tboard-issue-loop\tweb\tblocked\tissue=#79 reason=release-gate detail=v1.0-cut-pending"));
         let items = w.sorted();
         assert_eq!(items[0].state, WorkState::Blocked);
         assert_eq!(items[0].note, "v1.0-cut-pending");
 
         // Resume.
-        w.ingest(&ev("2026-05-12T08:00:00+02:00\tboard-issue-loop\tweb\tunblocked\tissue=#79"));
+        w.ingest(&ev(
+            "2026-05-12T08:00:00+02:00\tboard-issue-loop\tweb\tunblocked\tissue=#79",
+        ));
         let items = w.sorted();
         assert_eq!(items[0].state, WorkState::InProgress);
     }
@@ -428,26 +462,42 @@ mod tests {
         // isDraft=false. force-push doesn't toggle draft on GitHub, so
         // the work item shouldn't transition.
         let mut w = WorkItems::new();
-        w.ingest(&ev("2026-05-11T10:00:00+02:00\tboard-issue-loop\tweb\tpr-opened\tpr=#103 issue=#101"));
+        w.ingest(&ev(
+            "2026-05-11T10:00:00+02:00\tboard-issue-loop\tweb\tpr-opened\tpr=#103 issue=#101",
+        ));
         w.ingest(&ev("2026-05-11T12:25:00+02:00\tpr-review-fixup\tweb\tready-flipped\tpr=#103 by=supervisor-delegated"));
         assert_eq!(w.sorted()[0].state, WorkState::ReadyForMerge);
 
-        w.ingest(&ev("2026-05-11T12:30:00+02:00\tpr-review-fixup\tweb\tforce-push\tpr=#103 sha=abc1234"));
-        w.ingest(&ev("2026-05-11T12:31:00+02:00\tpr-review-fixup\tweb\tapplied\tpr=#103 comment=42"));
-        w.ingest(&ev("2026-05-11T12:32:00+02:00\tpr-review-fixup\tweb\trebased\tpr=#103"));
+        w.ingest(&ev(
+            "2026-05-11T12:30:00+02:00\tpr-review-fixup\tweb\tforce-push\tpr=#103 sha=abc1234",
+        ));
+        w.ingest(&ev(
+            "2026-05-11T12:31:00+02:00\tpr-review-fixup\tweb\tapplied\tpr=#103 comment=42",
+        ));
+        w.ingest(&ev(
+            "2026-05-11T12:32:00+02:00\tpr-review-fixup\tweb\trebased\tpr=#103",
+        ));
         assert_eq!(w.sorted()[0].state, WorkState::ReadyForMerge);
     }
 
     #[test]
     fn pr_merged_is_terminal_and_sorts_last() {
         let mut w = WorkItems::new();
-        w.ingest(&ev("2026-05-10T14:17:00+02:00\tboard-issue-loop\tweb\tpr-opened\tpr=#98 issue=#90"));
+        w.ingest(&ev(
+            "2026-05-10T14:17:00+02:00\tboard-issue-loop\tweb\tpr-opened\tpr=#98 issue=#90",
+        ));
         w.ingest(&ev("2026-05-10T14:17:05+02:00\tboard-issue-loop\tweb\tready-flipped\tpr=#98 by=supervisor-delegated"));
         // Active item competing for the top spot.
-        w.ingest(&ev("2026-05-11T08:00:00+02:00\tboard-issue-loop\tweb\tpick\tissue=#101"));
-        w.ingest(&ev("2026-05-11T08:01:00+02:00\tboard-issue-loop\tweb\tcard-in-progress\tissue=#101"));
+        w.ingest(&ev(
+            "2026-05-11T08:00:00+02:00\tboard-issue-loop\tweb\tpick\tissue=#101",
+        ));
+        w.ingest(&ev(
+            "2026-05-11T08:01:00+02:00\tboard-issue-loop\tweb\tcard-in-progress\tissue=#101",
+        ));
         // Now the PR is observed as merged.
-        w.ingest(&ev("2026-05-11T12:00:00+02:00\tpr-review-fixup\tweb\tpr-merged\tpr=#98 issue=#90"));
+        w.ingest(&ev(
+            "2026-05-11T12:00:00+02:00\tpr-review-fixup\tweb\tpr-merged\tpr=#98 issue=#90",
+        ));
 
         let items = w.sorted();
         // Merged sits below active work, regardless of recency.
@@ -458,11 +508,17 @@ mod tests {
     #[test]
     fn card_done_supersedes_merged() {
         let mut w = WorkItems::new();
-        w.ingest(&ev("2026-05-10T14:17:00+02:00\tboard-issue-loop\tweb\tpr-opened\tpr=#98 issue=#90"));
-        w.ingest(&ev("2026-05-11T12:00:00+02:00\tpr-review-fixup\tweb\tpr-merged\tpr=#98 issue=#90"));
+        w.ingest(&ev(
+            "2026-05-10T14:17:00+02:00\tboard-issue-loop\tweb\tpr-opened\tpr=#98 issue=#90",
+        ));
+        w.ingest(&ev(
+            "2026-05-11T12:00:00+02:00\tpr-review-fixup\tweb\tpr-merged\tpr=#98 issue=#90",
+        ));
         assert_eq!(w.sorted()[0].state, WorkState::Merged);
 
-        w.ingest(&ev("2026-05-11T12:00:05+02:00\tboard-issue-loop\tweb\tcard-done\tissue=#90"));
+        w.ingest(&ev(
+            "2026-05-11T12:00:05+02:00\tboard-issue-loop\tweb\tcard-done\tissue=#90",
+        ));
         assert_eq!(w.sorted()[0].state, WorkState::Done);
     }
 
@@ -472,33 +528,53 @@ mod tests {
         // so an orphan PR-only item exists; pr-merged carries the pairing, and
         // card-done must then retire the *folded* item — not leave the orphan.
         let mut w = WorkItems::new();
-        w.ingest(&ev("2026-06-01T10:00:00+02:00\tpr-review-fixup\tweb\tact-start\tpr=#150"));
+        w.ingest(&ev(
+            "2026-06-01T10:00:00+02:00\tpr-review-fixup\tweb\tact-start\tpr=#150",
+        ));
         assert_eq!(w.sorted().len(), 1);
         assert_eq!(w.sorted()[0].key, WorkKey::Pr(150), "orphan keyed by PR");
 
-        w.ingest(&ev("2026-06-01T10:01:00+02:00\tpr-review-fixup\tweb\tpr-merged\tpr=#150 issue=#116"));
+        w.ingest(&ev(
+            "2026-06-01T10:01:00+02:00\tpr-review-fixup\tweb\tpr-merged\tpr=#150 issue=#116",
+        ));
         assert_eq!(w.sorted().len(), 1, "folded — no duplicate row");
-        assert_eq!(w.sorted()[0].key, WorkKey::Issue(116), "re-keyed onto the issue");
+        assert_eq!(
+            w.sorted()[0].key,
+            WorkKey::Issue(116),
+            "re-keyed onto the issue"
+        );
         assert_eq!(w.sorted()[0].pr, Some(150));
         assert_eq!(w.sorted()[0].state, WorkState::Merged);
 
-        w.ingest(&ev("2026-06-01T10:02:00+02:00\tboard-issue-loop\tweb\tcard-done\tissue=#116"));
+        w.ingest(&ev(
+            "2026-06-01T10:02:00+02:00\tboard-issue-loop\tweb\tcard-done\tissue=#116",
+        ));
         assert_eq!(w.sorted().len(), 1);
-        assert_eq!(w.sorted()[0].state, WorkState::Done, "card-done retires the merged item");
+        assert_eq!(
+            w.sorted()[0].state,
+            WorkState::Done,
+            "card-done retires the merged item"
+        );
     }
 
     #[test]
     fn ticketless_pr_merged_goes_straight_to_done() {
         let mut w = WorkItems::new();
         // A PR with no linked ticket — keyed by the PR itself.
-        w.ingest(&ev("2026-05-10T14:17:00+02:00\tboard-issue-loop\tweb\tpr-opened\tpr=#60"));
-        w.ingest(&ev("2026-05-10T14:17:05+02:00\tboard-issue-loop\tweb\tready-flipped\tpr=#60"));
+        w.ingest(&ev(
+            "2026-05-10T14:17:00+02:00\tboard-issue-loop\tweb\tpr-opened\tpr=#60",
+        ));
+        w.ingest(&ev(
+            "2026-05-10T14:17:05+02:00\tboard-issue-loop\tweb\tready-flipped\tpr=#60",
+        ));
         assert_eq!(w.sorted()[0].state, WorkState::ReadyForMerge);
 
         // Observed merged. With no card/issue to retire it, the merge is its
         // completion — straight to Done (vs. a ticketed PR, which stays
         // Merged until card-done).
-        w.ingest(&ev("2026-05-11T12:00:00+02:00\tpr-review-fixup\tweb\tpr-merged\tpr=#60"));
+        w.ingest(&ev(
+            "2026-05-11T12:00:00+02:00\tpr-review-fixup\tweb\tpr-merged\tpr=#60",
+        ));
         let item = &w.sorted()[0];
         assert_eq!(item.state, WorkState::Done);
         assert!(item.issue.is_none(), "still ticketless");
@@ -510,7 +586,9 @@ mod tests {
         // Older sweeps wrote `issue=#0` for a no-ticket PR; it must retire to
         // Done (ticketless), not linger under a phantom issue #0.
         let mut w = WorkItems::new();
-        w.ingest(&ev("2026-05-31T00:23:08+02:00\tpr-review-fixup\tweb\tpr-merged\tpr=#148 issue=#0"));
+        w.ingest(&ev(
+            "2026-05-31T00:23:08+02:00\tpr-review-fixup\tweb\tpr-merged\tpr=#148 issue=#0",
+        ));
         let items = w.sorted();
         assert_eq!(items.len(), 1, "no phantom #0 item");
         let item = &items[0];
@@ -525,10 +603,16 @@ mod tests {
         // Skipped item, oldest.
         w.ingest(&ev("2026-05-09T10:00:00+02:00\tboard-issue-loop\tweb\tskip\tissue=#80 reason=assigned-to-other"));
         // In progress item, mid-age.
-        w.ingest(&ev("2026-05-10T14:17:00+02:00\tboard-issue-loop\tweb\tpick\tissue=#90"));
-        w.ingest(&ev("2026-05-10T14:18:00+02:00\tboard-issue-loop\tweb\tbranch\tissue=#90 name=x"));
+        w.ingest(&ev(
+            "2026-05-10T14:17:00+02:00\tboard-issue-loop\tweb\tpick\tissue=#90",
+        ));
+        w.ingest(&ev(
+            "2026-05-10T14:18:00+02:00\tboard-issue-loop\tweb\tbranch\tissue=#90 name=x",
+        ));
         // Ready-for-merge, newest. Should be first.
-        w.ingest(&ev("2026-05-11T09:00:00+02:00\tboard-issue-loop\tweb\tpr-opened\tpr=#100 issue=#95"));
+        w.ingest(&ev(
+            "2026-05-11T09:00:00+02:00\tboard-issue-loop\tweb\tpr-opened\tpr=#100 issue=#95",
+        ));
         w.ingest(&ev("2026-05-11T09:30:00+02:00\tpr-review-fixup\tweb\tready-flipped\tpr=#100 by=supervisor-delegated"));
 
         let items = w.sorted();

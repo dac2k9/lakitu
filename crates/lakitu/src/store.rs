@@ -18,8 +18,8 @@
 //! files are skipped (logged via `tracing`) so one bad file can't take
 //! down the pane.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -28,7 +28,7 @@ use chrono::{DateTime, FixedOffset};
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tokio::time::{interval, MissedTickBehavior};
+use tokio::time::{MissedTickBehavior, interval};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -494,7 +494,12 @@ async fn read_tasks_dir(root: &Path) -> HashMap<String, Vec<Task>> {
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        if !entry.file_type().await.map(|t| t.is_file()).unwrap_or(false) {
+        if !entry
+            .file_type()
+            .await
+            .map(|t| t.is_file())
+            .unwrap_or(false)
+        {
             continue;
         }
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(String::from) else {
@@ -507,7 +512,9 @@ async fn read_tasks_dir(root: &Path) -> HashMap<String, Vec<Task>> {
             Ok(files) => {
                 out.insert(stem, files.into_iter().map(task_from_file).collect());
             }
-            Err(err) => tracing::debug!(?err, path = %path.display(), "skipping malformed tasks file"),
+            Err(err) => {
+                tracing::debug!(?err, path = %path.display(), "skipping malformed tasks file")
+            }
         }
     }
     out
@@ -519,11 +526,14 @@ fn task_from_file(f: TaskFile) -> Task {
         text: f.text,
         body: f.body.filter(|b| !b.trim().is_empty()),
         done: f.done,
-        created: f.created.as_deref().and_then(|t| DateTime::parse_from_rfc3339(t).ok()),
-        pr: f
-            .pr
-            .filter(|p| !p.repo.trim().is_empty())
-            .map(|p| TaskPr { repo: p.repo, number: p.number }),
+        created: f
+            .created
+            .as_deref()
+            .and_then(|t| DateTime::parse_from_rfc3339(t).ok()),
+        pr: f.pr.filter(|p| !p.repo.trim().is_empty()).map(|p| TaskPr {
+            repo: p.repo,
+            number: p.number,
+        }),
         from_msg: f.from_msg.filter(|m| !m.trim().is_empty()),
     }
 }
@@ -545,7 +555,11 @@ pub fn task_display_order(tasks: &[Task]) -> Vec<usize> {
     let mut order = Vec::with_capacity(tasks.len());
     for (repo, num) in &pr_keys {
         for (i, t) in tasks.iter().enumerate() {
-            if t.pr.as_ref().map(|p| p.repo == *repo && p.number == *num).unwrap_or(false) {
+            if t.pr
+                .as_ref()
+                .map(|p| p.repo == *repo && p.number == *num)
+                .unwrap_or(false)
+            {
                 order.push(i);
             }
         }
@@ -587,7 +601,11 @@ async fn read_agent(agents_dir: &Path, name: &str) -> Option<Agent> {
     // The directory stem is authoritative for the name; the file's `name`
     // field is a convenience that should match but we don't depend on it.
     let display_name = reg.name.unwrap_or_else(|| name.to_string());
-    let kind = reg.kind.as_deref().map(ClientKind::parse).unwrap_or(ClientKind::Agent);
+    let kind = reg
+        .kind
+        .as_deref()
+        .map(ClientKind::parse)
+        .unwrap_or(ClientKind::Agent);
 
     let mut state = AgentState::Unknown;
     let mut task = None;
@@ -595,9 +613,16 @@ async fn read_agent(agents_dir: &Path, name: &str) -> Option<Agent> {
     let hb_path = agents_dir.join(format!("{name}.heartbeat.json"));
     if let Ok(raw) = tokio::fs::read_to_string(&hb_path).await {
         if let Ok(hb) = serde_json::from_str::<HeartbeatFile>(&raw) {
-            state = hb.state.as_deref().map(AgentState::parse).unwrap_or(AgentState::Unknown);
+            state = hb
+                .state
+                .as_deref()
+                .map(AgentState::parse)
+                .unwrap_or(AgentState::Unknown);
             task = hb.task.filter(|t| !t.trim().is_empty());
-            last_seen = hb.ts.as_deref().and_then(|t| DateTime::parse_from_rfc3339(t).ok());
+            last_seen = hb
+                .ts
+                .as_deref()
+                .and_then(|t| DateTime::parse_from_rfc3339(t).ok());
         }
     }
 
@@ -640,7 +665,7 @@ async fn read_inbox(dir: &Path) -> Vec<Message> {
     read_message_dir(dir, false, &mut msgs).await;
     read_message_dir(&dir.join("read"), true, &mut msgs).await;
     // Newest first; messages with no parseable time sort last.
-    msgs.sort_by(|a, b| b.time.cmp(&a.time));
+    msgs.sort_by_key(|m| std::cmp::Reverse(m.time));
     msgs
 }
 
@@ -659,7 +684,10 @@ async fn read_message_dir(dir: &Path, read: bool, out: &mut Vec<Message>) {
         match serde_json::from_str::<MessageFile>(&raw) {
             Ok(m) => out.push(Message {
                 id: m.id,
-                time: m.time.as_deref().and_then(|t| DateTime::parse_from_rfc3339(t).ok()),
+                time: m
+                    .time
+                    .as_deref()
+                    .and_then(|t| DateTime::parse_from_rfc3339(t).ok()),
                 from: m.from,
                 title: m.title,
                 body: m.body,
@@ -835,16 +863,27 @@ mod tests {
     #[tokio::test]
     async fn stale_when_heartbeat_old() {
         let root = scratch("stale");
-        let old = (chrono::Local::now() - chrono::Duration::minutes(STALE_AFTER_MINUTES + 5)).to_rfc3339();
-        write(root.join("agents/slow.json"), r#"{"name":"slow","repo":"r","board":"b"}"#);
+        let old = (chrono::Local::now() - chrono::Duration::minutes(STALE_AFTER_MINUTES + 5))
+            .to_rfc3339();
+        write(
+            root.join("agents/slow.json"),
+            r#"{"name":"slow","repo":"r","board":"b"}"#,
+        );
         write(
             root.join("agents/slow.heartbeat.json"),
             &format!(r#"{{"ts":"{old}","state":"working"}}"#),
         );
         let snap = read_snapshot(&root).await;
         assert_eq!(snap.agents.len(), 1);
-        assert!(snap.agents[0].stale, "heartbeat older than the window ⇒ stale");
-        assert_eq!(snap.agents[0].state, AgentState::Working, "declared state preserved");
+        assert!(
+            snap.agents[0].stale,
+            "heartbeat older than the window ⇒ stale"
+        );
+        assert_eq!(
+            snap.agents[0].state,
+            AgentState::Working,
+            "declared state preserved"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -865,7 +904,10 @@ mod tests {
         );
 
         let snap = read_snapshot(&root).await;
-        let tasks = snap.tasks.get("aria").expect("aria has tasks in the snapshot");
+        let tasks = snap
+            .tasks
+            .get("aria")
+            .expect("aria has tasks in the snapshot");
         assert_eq!(tasks.len(), 3);
         let t2 = tasks.iter().find(|t| t.id == "t2").unwrap();
         assert_eq!(t2.pr.as_ref().unwrap().number, 12);

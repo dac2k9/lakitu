@@ -64,7 +64,14 @@ impl Event {
         let timestamp = DateTime::parse_from_rfc3339(ts_str).ok()?;
         let refs = extract_refs(&details);
 
-        Some(Event { timestamp, skill, repo, action, details, refs })
+        Some(Event {
+            timestamp,
+            skill,
+            repo,
+            action,
+            details,
+            refs,
+        })
     }
 
     /// Background color for the action cell — see CLAUDE-Code-style log
@@ -111,11 +118,15 @@ fn extract_refs(details: &str) -> Vec<Reference> {
         let next_match = patterns
             .iter()
             .filter_map(|(prefix, kind)| {
-                details[cursor..].find(prefix).map(|idx| (cursor + idx, *prefix, *kind))
+                details[cursor..]
+                    .find(prefix)
+                    .map(|idx| (cursor + idx, *prefix, *kind))
             })
             .min_by_key(|(idx, _, _)| *idx);
 
-        let Some((match_start, prefix, kind)) = next_match else { break };
+        let Some((match_start, prefix, kind)) = next_match else {
+            break;
+        };
         let num_start = match_start + prefix.len() - 1; // include the '#'
 
         // Read consecutive digits after the '#'.

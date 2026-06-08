@@ -11,23 +11,23 @@
 //! on the next loop iteration.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use color_eyre::Result;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event as CtEvent, EventStream, KeyboardEnhancementFlags,
-    KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    DisableMouseCapture, EnableMouseCapture, Event as CtEvent, EventStream, KeyCode, KeyEventKind,
+    KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures::StreamExt;
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc;
@@ -35,16 +35,15 @@ use tokio::time::interval;
 
 use crate::client;
 use crate::event::{Event, RefKind};
-use crate::remote::{self, WriteCmd};
 use crate::gh::{self, Meta, MetaUpdate};
 use crate::log;
+use crate::remote::{self, WriteCmd};
 use crate::store::{self, Agent, Message, Project, StoreSnapshot, Task, Usage};
 use crate::ui;
 use crate::work::{WorkItems, WorkState};
 
 const TICK_MS: u64 = 80;
-const SKILL_FILTERS: &[Option<&str>] =
-    &[None, Some("board-issue-loop"), Some("pr-review-fixup")];
+const SKILL_FILTERS: &[Option<&str>] = &[None, Some("board-issue-loop"), Some("pr-review-fixup")];
 
 /// Which pane has keyboard focus. Default is the event stream (today's
 /// behavior); `DoneReview` activates when the user presses `d` and
@@ -91,7 +90,10 @@ pub enum ComposeTarget {
     Everyone,
     /// A whole team/project. Delivered to the coordinator alone if it has one
     /// (they triage for the team), otherwise to every member.
-    Team { id: String, name: String },
+    Team {
+        id: String,
+        name: String,
+    },
     Client(String),
 }
 
@@ -189,14 +191,20 @@ fn move_line(s: &str, cursor: usize, down: bool) -> usize {
             return cur; // last line
         };
         let nls = nl + 1;
-        let nle = (nls..chars.len()).find(|&i| chars[i] == '\n').unwrap_or(chars.len());
+        let nle = (nls..chars.len())
+            .find(|&i| chars[i] == '\n')
+            .unwrap_or(chars.len());
         nls + col.min(nle - nls)
     } else {
         if line_start == 0 {
             return cur; // first line
         }
         let prev_end = line_start - 1;
-        let prev_start = (0..prev_end).rev().find(|&i| chars[i] == '\n').map(|i| i + 1).unwrap_or(0);
+        let prev_start = (0..prev_end)
+            .rev()
+            .find(|&i| chars[i] == '\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
         prev_start + col.min(prev_end - prev_start)
     }
 }
@@ -563,7 +571,9 @@ impl App {
                     if let Some(id) = self.projects.get(*idx).map(|p| p.id.clone()) {
                         target_idx = targets
                             .iter()
-                            .position(|t| matches!(t, ComposeTarget::Team { id: tid, .. } if *tid == id))
+                            .position(
+                                |t| matches!(t, ComposeTarget::Team { id: tid, .. } if *tid == id),
+                            )
                             .unwrap_or(0);
                     }
                 }
@@ -575,7 +585,9 @@ impl App {
                             .unwrap_or(0);
                     }
                 }
-                Some(TreeRow::Item { repo, pr, issue, .. }) => {
+                Some(TreeRow::Item {
+                    repo, pr, issue, ..
+                }) => {
                     // Self-label the message with what you're looking at: the
                     // PR if there is one, else the issue.
                     if let Some(n) = pr {
@@ -644,7 +656,10 @@ impl App {
     fn compose_targets(&self, me: &str) -> Vec<ComposeTarget> {
         let mut targets = vec![ComposeTarget::Everyone];
         for p in &self.projects {
-            targets.push(ComposeTarget::Team { id: p.id.clone(), name: p.name.clone() });
+            targets.push(ComposeTarget::Team {
+                id: p.id.clone(),
+                name: p.name.clone(),
+            });
         }
         for a in &self.roster {
             if a.name != me {
@@ -672,7 +687,9 @@ impl App {
         let mut targets = self.compose_targets(&me);
         // Reply to the sender even if they aren't a current roster client.
         if from != me
-            && !targets.iter().any(|t| matches!(t, ComposeTarget::Client(n) if *n == from))
+            && !targets
+                .iter()
+                .any(|t| matches!(t, ComposeTarget::Client(n) if *n == from))
         {
             targets.push(ComposeTarget::Client(from.clone()));
         }
@@ -726,7 +743,11 @@ impl App {
                 };
                 let body = {
                     let b = m.body.trim();
-                    if b.is_empty() || b == text.trim() { None } else { Some(m.body.clone()) }
+                    if b.is_empty() || b == text.trim() {
+                        None
+                    } else {
+                        Some(m.body.clone())
+                    }
                 };
                 (text, body, m.id.clone())
             })
@@ -771,7 +792,9 @@ impl App {
             self.compose = None;
             return;
         };
-        let Some(c) = self.compose.as_ref() else { return };
+        let Some(c) = self.compose.as_ref() else {
+            return;
+        };
         if c.title.trim().is_empty() && c.body.trim().is_empty() {
             if let Some(c) = self.compose.as_mut() {
                 c.error = Some("Type a title or body before sending.".to_string());
@@ -885,7 +908,10 @@ impl App {
         let cur = self.project_of(&name).map(|k| k + 1).unwrap_or(0);
         let next = (cur + 1) % (self.projects.len() + 1);
         let target = (next > 0).then(|| self.projects[next - 1].id.clone());
-        let _ = self.write_tx.send(WriteCmd::SetMembership { client: name.clone(), project_id: target });
+        let _ = self.write_tx.send(WriteCmd::SetMembership {
+            client: name.clone(),
+            project_id: target,
+        });
         self.reselect_client = Some(name); // keep the cursor on the moved client (reflected next poll)
     }
 
@@ -913,7 +939,10 @@ impl App {
         };
         if let Some(pi) = self.project_of(&name) {
             let id = self.projects[pi].id.clone();
-            let _ = self.write_tx.send(WriteCmd::ToggleCoordinator { id, client: name.clone() });
+            let _ = self.write_tx.send(WriteCmd::ToggleCoordinator {
+                id,
+                client: name.clone(),
+            });
             self.reselect_client = Some(name); // coordinator sorts first; follow it (next poll)
         }
     }
@@ -953,7 +982,10 @@ impl App {
         if let Some(msg) = self.open_inbox().get(self.inbox_selected) {
             if !msg.read {
                 let id = msg.id.clone();
-                let _ = self.write_tx.send(WriteCmd::MarkRead { owner: owner.clone(), id });
+                let _ = self.write_tx.send(WriteCmd::MarkRead {
+                    owner: owner.clone(),
+                    id,
+                });
             }
         }
     }
@@ -1028,7 +1060,9 @@ impl App {
     /// Open the first #N reference of the currently-selected event in
     /// the user's browser.
     fn open_selected(&self) {
-        let Some(ev) = self.filtered_events().get(self.selected).copied() else { return };
+        let Some(ev) = self.filtered_events().get(self.selected).copied() else {
+            return;
+        };
         let Some(first) = ev.refs.first() else { return };
         let url = first.kind.url(&ev.repo_with_owner(), first.number);
         let _ = webbrowser::open(&url);
@@ -1038,7 +1072,9 @@ impl App {
     /// in the user's browser. PR wins because for a Done item the PR is
     /// where the actual changes live and where reviewers' comments are.
     fn open_story_target(&self, issue: u64) {
-        let Some(w) = self.work.get(issue) else { return };
+        let Some(w) = self.work.get(issue) else {
+            return;
+        };
         let url = if let Some(pr) = w.pr {
             RefKind::Pr.url(&w.repo, pr)
         } else {
@@ -1050,7 +1086,12 @@ impl App {
     fn filtered_events(&self) -> Vec<&Event> {
         self.events
             .iter()
-            .filter(|e| self.skill_filter.as_ref().map(|f| &e.skill == f).unwrap_or(true))
+            .filter(|e| {
+                self.skill_filter
+                    .as_ref()
+                    .map(|f| &e.skill == f)
+                    .unwrap_or(true)
+            })
             .collect()
     }
 
@@ -1082,7 +1123,13 @@ impl App {
                     RefKind::Issue | RefKind::NewIssue => gh::fetch_issue(repo, number).await,
                     RefKind::Pr => gh::fetch_pr(repo, number).await,
                 };
-                let _ = tx.send(MetaUpdate { kind, number, meta: meta.unwrap_or_default() }).await;
+                let _ = tx
+                    .send(MetaUpdate {
+                        kind,
+                        number,
+                        meta: meta.unwrap_or_default(),
+                    })
+                    .await;
             });
         }
     }
@@ -1169,14 +1216,24 @@ pub async fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result =
-        event_loop(&mut terminal, &mut app, &mut log_rx, &mut meta_rx, &mut store_rx).await;
+    let result = event_loop(
+        &mut terminal,
+        &mut app,
+        &mut log_rx,
+        &mut meta_rx,
+        &mut store_rx,
+    )
+    .await;
 
     disable_raw_mode()?;
     if kbd_enhanced {
         let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
     }
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
 
     // Stop the inbox-waker if it was toggled on — it must not outlive the cockpit.
@@ -1298,9 +1355,7 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
     match ev {
         // First-run name prompt — owns input while open: type your name,
         // Enter to join as a client, Esc to skip (run without an identity).
-        CtEvent::Key(key)
-            if key.kind == KeyEventKind::Press && app.name_prompt.is_some() =>
-        {
+        CtEvent::Key(key) if key.kind == KeyEventKind::Press && app.name_prompt.is_some() => {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 KeyCode::Esc => app.name_prompt = None,
@@ -1329,9 +1384,7 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
         }
         // New-project name prompt — owns input while open: type a name, Enter
         // creates it, Esc cancels.
-        CtEvent::Key(key)
-            if key.kind == KeyEventKind::Press && app.new_project.is_some() =>
-        {
+        CtEvent::Key(key) if key.kind == KeyEventKind::Press && app.new_project.is_some() => {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 KeyCode::Esc => app.new_project = None,
@@ -1355,9 +1408,7 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
         }
         // Rename-project prompt — owns input while open: edit the name, Enter
         // saves, Esc cancels.
-        CtEvent::Key(key)
-            if key.kind == KeyEventKind::Press && app.rename_project.is_some() =>
-        {
+        CtEvent::Key(key) if key.kind == KeyEventKind::Press && app.rename_project.is_some() => {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 KeyCode::Esc => app.rename_project = None,
@@ -1397,28 +1448,26 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
             }
         }
         // Help overlay — scroll it while open; ? / esc / q close it.
-        CtEvent::Key(key) if key.kind == KeyEventKind::Press && app.show_help => {
-            match key.code {
-                KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => {
-                    app.show_help = false;
-                    app.help_scroll = 0;
-                }
-                KeyCode::Char('j') | KeyCode::Down => {
-                    app.help_scroll = app.help_scroll.saturating_add(1);
-                }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    app.help_scroll = app.help_scroll.saturating_sub(1);
-                }
-                KeyCode::PageDown | KeyCode::Char(' ') => {
-                    app.help_scroll = app.help_scroll.saturating_add(10);
-                }
-                KeyCode::PageUp => {
-                    app.help_scroll = app.help_scroll.saturating_sub(10);
-                }
-                KeyCode::Home | KeyCode::Char('g') => app.help_scroll = 0,
-                _ => {}
+        CtEvent::Key(key) if key.kind == KeyEventKind::Press && app.show_help => match key.code {
+            KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => {
+                app.show_help = false;
+                app.help_scroll = 0;
             }
-        }
+            KeyCode::Char('j') | KeyCode::Down => {
+                app.help_scroll = app.help_scroll.saturating_add(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                app.help_scroll = app.help_scroll.saturating_sub(1);
+            }
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                app.help_scroll = app.help_scroll.saturating_add(10);
+            }
+            KeyCode::PageUp => {
+                app.help_scroll = app.help_scroll.saturating_sub(10);
+            }
+            KeyCode::Home | KeyCode::Char('g') => app.help_scroll = 0,
+            _ => {}
+        },
         // Compose modal — owns input while open. Tab cycles fields, arrows
         // pick the recipient, typing edits Title/Body, Enter advances (and
         // sends from Body), Esc cancels.
@@ -1440,133 +1489,134 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
                     _ => {}
                 }
             } else {
-            match key.code {
-                KeyCode::Esc => app.compose = None,
-                KeyCode::Tab => {
-                    if let Some(c) = app.compose.as_mut() {
-                        c.field = c.field.next();
-                    }
-                }
-                KeyCode::BackTab => {
-                    if let Some(c) = app.compose.as_mut() {
-                        c.field = c.field.prev();
-                    }
-                }
-                KeyCode::Enter => {
-                    // Shift/Alt+Enter inserts a newline in the body; plain
-                    // Enter sends (from the body) or advances (other fields).
-                    let newline = key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT);
-                    match field {
-                        Some(ComposeField::Body) if newline => {
-                            if let Some(c) = app.compose.as_mut() {
-                                insert_at(&mut c.body, &mut c.body_cursor, '\n');
-                            }
+                match key.code {
+                    KeyCode::Esc => app.compose = None,
+                    KeyCode::Tab => {
+                        if let Some(c) = app.compose.as_mut() {
+                            c.field = c.field.next();
                         }
-                        Some(ComposeField::Body) => {
-                            // Stage the send — the confirm prompt + a second
-                            // Enter (or `y`) actually dispatches it.
-                            if let Some(c) = app.compose.as_mut() {
-                                if c.title.trim().is_empty() && c.body.trim().is_empty() {
-                                    c.error =
-                                        Some("Type a title or body before sending.".to_string());
-                                } else {
-                                    c.error = None;
-                                    c.confirming = true;
+                    }
+                    KeyCode::BackTab => {
+                        if let Some(c) = app.compose.as_mut() {
+                            c.field = c.field.prev();
+                        }
+                    }
+                    KeyCode::Enter => {
+                        // Shift/Alt+Enter inserts a newline in the body; plain
+                        // Enter sends (from the body) or advances (other fields).
+                        let newline = key
+                            .modifiers
+                            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT);
+                        match field {
+                            Some(ComposeField::Body) if newline => {
+                                if let Some(c) = app.compose.as_mut() {
+                                    insert_at(&mut c.body, &mut c.body_cursor, '\n');
                                 }
                             }
+                            Some(ComposeField::Body) => {
+                                // Stage the send — the confirm prompt + a second
+                                // Enter (or `y`) actually dispatches it.
+                                if let Some(c) = app.compose.as_mut() {
+                                    if c.title.trim().is_empty() && c.body.trim().is_empty() {
+                                        c.error = Some(
+                                            "Type a title or body before sending.".to_string(),
+                                        );
+                                    } else {
+                                        c.error = None;
+                                        c.confirming = true;
+                                    }
+                                }
+                            }
+                            Some(_) => {
+                                if let Some(c) = app.compose.as_mut() {
+                                    c.field = c.field.next();
+                                }
+                            }
+                            None => {}
                         }
-                        Some(_) => {
-                            if let Some(c) = app.compose.as_mut() {
-                                c.field = c.field.next();
+                    }
+                    KeyCode::Left | KeyCode::Up if field == Some(ComposeField::Recipient) => {
+                        if let Some(c) = app.compose.as_mut() {
+                            c.target_idx = if c.target_idx == 0 {
+                                c.targets.len() - 1
+                            } else {
+                                c.target_idx - 1
+                            };
+                        }
+                    }
+                    KeyCode::Right | KeyCode::Down if field == Some(ComposeField::Recipient) => {
+                        if let Some(c) = app.compose.as_mut() {
+                            c.target_idx = (c.target_idx + 1) % c.targets.len();
+                        }
+                    }
+                    // Caret movement within Title/Body (Recipient handled above).
+                    KeyCode::Left => {
+                        if let Some(c) = app.compose.as_mut() {
+                            if let Some((_, cur)) = c.active_field_mut() {
+                                *cur = cur.saturating_sub(1);
                             }
                         }
-                        None => {}
                     }
-                }
-                KeyCode::Left | KeyCode::Up if field == Some(ComposeField::Recipient) => {
-                    if let Some(c) = app.compose.as_mut() {
-                        c.target_idx = if c.target_idx == 0 {
-                            c.targets.len() - 1
-                        } else {
-                            c.target_idx - 1
-                        };
-                    }
-                }
-                KeyCode::Right | KeyCode::Down if field == Some(ComposeField::Recipient) => {
-                    if let Some(c) = app.compose.as_mut() {
-                        c.target_idx = (c.target_idx + 1) % c.targets.len();
-                    }
-                }
-                // Caret movement within Title/Body (Recipient handled above).
-                KeyCode::Left => {
-                    if let Some(c) = app.compose.as_mut() {
-                        if let Some((_, cur)) = c.active_field_mut() {
-                            *cur = cur.saturating_sub(1);
+                    KeyCode::Right => {
+                        if let Some(c) = app.compose.as_mut() {
+                            if let Some((s, cur)) = c.active_field_mut() {
+                                *cur = (*cur + 1).min(char_len(s));
+                            }
                         }
                     }
-                }
-                KeyCode::Right => {
-                    if let Some(c) = app.compose.as_mut() {
-                        if let Some((s, cur)) = c.active_field_mut() {
-                            *cur = (*cur + 1).min(char_len(s));
+                    KeyCode::Up if field == Some(ComposeField::Body) => {
+                        if let Some(c) = app.compose.as_mut() {
+                            c.body_cursor = move_line(&c.body, c.body_cursor, false);
                         }
                     }
-                }
-                KeyCode::Up if field == Some(ComposeField::Body) => {
-                    if let Some(c) = app.compose.as_mut() {
-                        c.body_cursor = move_line(&c.body, c.body_cursor, false);
-                    }
-                }
-                KeyCode::Down if field == Some(ComposeField::Body) => {
-                    if let Some(c) = app.compose.as_mut() {
-                        c.body_cursor = move_line(&c.body, c.body_cursor, true);
-                    }
-                }
-                KeyCode::Home => {
-                    if let Some(c) = app.compose.as_mut() {
-                        if let Some((_, cur)) = c.active_field_mut() {
-                            *cur = 0;
+                    KeyCode::Down if field == Some(ComposeField::Body) => {
+                        if let Some(c) = app.compose.as_mut() {
+                            c.body_cursor = move_line(&c.body, c.body_cursor, true);
                         }
                     }
-                }
-                KeyCode::End => {
-                    if let Some(c) = app.compose.as_mut() {
-                        if let Some((s, cur)) = c.active_field_mut() {
-                            *cur = char_len(s);
+                    KeyCode::Home => {
+                        if let Some(c) = app.compose.as_mut() {
+                            if let Some((_, cur)) = c.active_field_mut() {
+                                *cur = 0;
+                            }
                         }
                     }
-                }
-                KeyCode::Backspace => {
-                    if let Some(c) = app.compose.as_mut() {
-                        if let Some((s, cur)) = c.active_field_mut() {
-                            backspace_at(s, cur);
+                    KeyCode::End => {
+                        if let Some(c) = app.compose.as_mut() {
+                            if let Some((s, cur)) = c.active_field_mut() {
+                                *cur = char_len(s);
+                            }
                         }
                     }
-                }
-                KeyCode::Delete => {
-                    if let Some(c) = app.compose.as_mut() {
-                        if let Some((s, cur)) = c.active_field_mut() {
-                            delete_at(s, cur);
+                    KeyCode::Backspace => {
+                        if let Some(c) = app.compose.as_mut() {
+                            if let Some((s, cur)) = c.active_field_mut() {
+                                backspace_at(s, cur);
+                            }
                         }
                     }
-                }
-                KeyCode::Char(ch) if !ctrl => {
-                    if let Some(c) = app.compose.as_mut() {
-                        if let Some((s, cur)) = c.active_field_mut() {
-                            insert_at(s, cur, ch);
+                    KeyCode::Delete => {
+                        if let Some(c) = app.compose.as_mut() {
+                            if let Some((s, cur)) = c.active_field_mut() {
+                                delete_at(s, cur);
+                            }
                         }
                     }
+                    KeyCode::Char(ch) if !ctrl => {
+                        if let Some(c) = app.compose.as_mut() {
+                            if let Some((s, cur)) = c.active_field_mut() {
+                                insert_at(s, cur, ch);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
-            }
             }
         }
         // Inbox modal — owns input exclusively while open. j/k walk the
         // message list (master/detail), `r` archives the selected message in
         // your own inbox, esc closes back to the Clients pane.
-        CtEvent::Key(key)
-            if key.kind == KeyEventKind::Press && app.show_inbox_for.is_some() =>
-        {
+        CtEvent::Key(key) if key.kind == KeyEventKind::Press && app.show_inbox_for.is_some() => {
             match key.code {
                 // A pending delete captures the next key: y/Enter confirms,
                 // anything else cancels (disarmed below before dispatch).
@@ -1623,9 +1673,7 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
             }
         }
         // Story modal — owns input exclusively while open.
-        CtEvent::Key(key)
-            if key.kind == KeyEventKind::Press && app.show_story_for.is_some() =>
-        {
+        CtEvent::Key(key) if key.kind == KeyEventKind::Press && app.show_story_for.is_some() => {
             match key.code {
                 KeyCode::Char('c') => {
                     if let Some(issue) = app.show_story_for {
@@ -1657,9 +1705,7 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
         // Tasks modal — owns input exclusively while open. Browse with j/k;
         // space toggles done, `a` adds, `d` drops, esc closes. When the add
         // line is active (`task_input`), keys edit that buffer instead.
-        CtEvent::Key(key)
-            if key.kind == KeyEventKind::Press && app.show_tasks_for.is_some() =>
-        {
+        CtEvent::Key(key) if key.kind == KeyEventKind::Press && app.show_tasks_for.is_some() => {
             let name = app.show_tasks_for.clone().unwrap_or_default();
             if app.task_input.is_some() {
                 match key.code {
@@ -1752,14 +1798,10 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
                     app.show_story_for = Some(issue);
                 }
             }
-            KeyCode::Char('k') | KeyCode::Up
-                if app.focus_mode == FocusMode::DoneReview =>
-            {
+            KeyCode::Char('k') | KeyCode::Up if app.focus_mode == FocusMode::DoneReview => {
                 app.done_selected = app.done_selected.saturating_sub(1);
             }
-            KeyCode::Char('j') | KeyCode::Down
-                if app.focus_mode == FocusMode::DoneReview =>
-            {
+            KeyCode::Char('j') | KeyCode::Down if app.focus_mode == FocusMode::DoneReview => {
                 let len = app.done_items_visible().len();
                 if app.done_selected + 1 < len {
                     app.done_selected += 1;
@@ -1772,7 +1814,9 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
                 app.focus_mode = FocusMode::Events;
             }
             KeyCode::Enter if app.focus_mode == FocusMode::Clients => {
-                let shift = key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT);
+                let shift = key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT);
                 match app.tree_rows.get(app.tree_selected).cloned() {
                     Some(TreeRow::Client(i)) => {
                         if let Some(name) = app.roster.get(i).map(|a| a.name.clone()) {
@@ -1783,7 +1827,9 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
                             app.read_selected_in_own_inbox();
                         }
                     }
-                    Some(TreeRow::Item { repo, pr, issue, .. }) => {
+                    Some(TreeRow::Item {
+                        repo, pr, issue, ..
+                    }) => {
                         // Enter → the PR (where the work is); shift+enter → the
                         // ticket. Each falls back to the other if only one exists.
                         let url = if shift {
@@ -1816,9 +1862,11 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
             KeyCode::Char('t') if app.focus_mode == FocusMode::Clients => {
                 let name = match app.tree_rows.get(app.tree_selected) {
                     Some(TreeRow::Client(i)) => app.roster.get(*i).map(|a| a.name.clone()),
-                    Some(TreeRow::Item { repo, .. }) => {
-                        app.roster.iter().find(|a| &a.repo == repo).map(|a| a.name.clone())
-                    }
+                    Some(TreeRow::Item { repo, .. }) => app
+                        .roster
+                        .iter()
+                        .find(|a| &a.repo == repo)
+                        .map(|a| a.name.clone()),
                     _ => None,
                 };
                 if let Some(name) = name {
@@ -1833,8 +1881,11 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
                 if app.focus_mode == FocusMode::Clients
                     && key.modifiers.contains(KeyModifiers::SHIFT) =>
             {
-                if let Some(&prev) =
-                    app.group_starts().iter().rev().find(|&&i| i < app.tree_selected)
+                if let Some(&prev) = app
+                    .group_starts()
+                    .iter()
+                    .rev()
+                    .find(|&&i| i < app.tree_selected)
                 {
                     app.tree_selected = prev;
                 }
@@ -1843,9 +1894,7 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
                 if app.focus_mode == FocusMode::Clients
                     && key.modifiers.contains(KeyModifiers::SHIFT) =>
             {
-                if let Some(&next) =
-                    app.group_starts().iter().find(|&&i| i > app.tree_selected)
-                {
+                if let Some(&next) = app.group_starts().iter().find(|&&i| i > app.tree_selected) {
                     app.tree_selected = next;
                 }
             }
@@ -1960,9 +2009,8 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
                     app.focus_mode = FocusMode::Events;
                 } else {
                     app.focus_mode = FocusMode::Clients;
-                    app.tree_selected = app
-                        .tree_selected
-                        .min(app.tree_rows.len().saturating_sub(1));
+                    app.tree_selected =
+                        app.tree_selected.min(app.tree_rows.len().saturating_sub(1));
                 }
             }
             // `d` toggles into Done review — only when the Work-items pane is
@@ -2025,7 +2073,7 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
     InputResult::Continue
 }
 
-fn hit_test<'a>(targets: &'a [ClickTarget], row: u16, col: u16) -> Option<&'a ClickTarget> {
+fn hit_test(targets: &[ClickTarget], row: u16, col: u16) -> Option<&ClickTarget> {
     targets
         .iter()
         .find(|t| t.row == row && col >= t.col_start && col < t.col_end)
@@ -2085,9 +2133,7 @@ fn append_acknowledgement(issue: u64) -> std::io::Result<()> {
     let ts = chrono::Local::now()
         .format("%Y-%m-%dT%H:%M:%S%:z")
         .to_string();
-    let line = format!(
-        "{ts}\tlakitu-tui\tweb\tcard-acknowledged\tissue=#{issue}\n"
-    );
+    let line = format!("{ts}\tlakitu-tui\tweb\tcard-acknowledged\tissue=#{issue}\n");
     let path = audit_log_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -2121,7 +2167,11 @@ mod tests {
         assert_eq!((s.as_str(), cur), ("ac", 2));
         cur -= 1; // ← Left
         insert_at(&mut s, &mut cur, 'b');
-        assert_eq!((s.as_str(), cur), ("abc", 2), "insert lands mid-text, not at the end");
+        assert_eq!(
+            (s.as_str(), cur),
+            ("abc", 2),
+            "insert lands mid-text, not at the end"
+        );
         // Backspace removes the char before the caret ('b').
         backspace_at(&mut s, &mut cur);
         assert_eq!((s.as_str(), cur), ("ac", 1));
@@ -2132,7 +2182,11 @@ mod tests {
         let mut s = String::from("abc");
         let mut cur = 1; // before 'b'
         delete_at(&mut s, &mut cur);
-        assert_eq!((s.as_str(), cur), ("ac", 1), "Delete removes char at caret, caret stays");
+        assert_eq!(
+            (s.as_str(), cur),
+            ("ac", 1),
+            "Delete removes char at caret, caret stays"
+        );
         // Delete at end is a no-op.
         let mut cur_end = 2;
         delete_at(&mut s, &mut cur_end);
@@ -2158,7 +2212,7 @@ mod tests {
     fn move_line_keeps_column() {
         let s = "abc\nde\nfghi";
         // On line 0 col 2 ('c' is idx 2). Down → line 1, clamped to its len (2).
-        assert_eq!(move_line(s, 2, true), 4 + 2.min(2)); // "abc\n" = 4 chars, +col2 → 6
+        assert_eq!(move_line(s, 2, true), 4 + 2); // "abc\n" = 4 chars, +col2 → 6
         // From line 1 (idx 5, col 1) up → line 0 col 1 (idx 1).
         assert_eq!(move_line(s, 5, false), 1);
         // Up on the first line stays put; down on the last line stays put.

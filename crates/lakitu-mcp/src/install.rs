@@ -9,15 +9,30 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// The lifecycle hooks, embedded from `assets/hooks/` at build time.
 const HOOKS: &[(&str, &str)] = &[
-    ("state-hook.sh", include_str!("../assets/hooks/state-hook.sh")),
-    ("inbox-check.sh", include_str!("../assets/hooks/inbox-check.sh")),
-    ("context-statusline.sh", include_str!("../assets/hooks/context-statusline.sh")),
-    ("persona-sessionstart.sh", include_str!("../assets/hooks/persona-sessionstart.sh")),
-    ("tasks-sessionstart.sh", include_str!("../assets/hooks/tasks-sessionstart.sh")),
+    (
+        "state-hook.sh",
+        include_str!("../assets/hooks/state-hook.sh"),
+    ),
+    (
+        "inbox-check.sh",
+        include_str!("../assets/hooks/inbox-check.sh"),
+    ),
+    (
+        "context-statusline.sh",
+        include_str!("../assets/hooks/context-statusline.sh"),
+    ),
+    (
+        "persona-sessionstart.sh",
+        include_str!("../assets/hooks/persona-sessionstart.sh"),
+    ),
+    (
+        "tasks-sessionstart.sh",
+        include_str!("../assets/hooks/tasks-sessionstart.sh"),
+    ),
 ];
 
 const SKILL: &str = include_str!("../assets/skill/fleet-coordination/SKILL.md");
@@ -41,20 +56,26 @@ pub fn run() -> Result<()> {
     let fleet = fleet_root(&home);
 
     // 1. Hook scripts → the fleet store dir (executable).
-    std::fs::create_dir_all(&fleet)
-        .with_context(|| format!("creating {}", fleet.display()))?;
+    std::fs::create_dir_all(&fleet).with_context(|| format!("creating {}", fleet.display()))?;
     for (name, body) in HOOKS {
         let path = fleet.join(name);
         std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
         make_executable(&path)?;
     }
-    println!("✓ installed {} fleet hooks → {}", HOOKS.len(), fleet.display());
+    println!(
+        "✓ installed {} fleet hooks → {}",
+        HOOKS.len(),
+        fleet.display()
+    );
 
     // 2. Coordination skill → ~/.claude/skills/.
     let skill_dir = claude.join("skills").join("fleet-coordination");
     std::fs::create_dir_all(&skill_dir)?;
     std::fs::write(skill_dir.join("SKILL.md"), SKILL)?;
-    println!("✓ installed skill → {}", skill_dir.join("SKILL.md").display());
+    println!(
+        "✓ installed skill → {}",
+        skill_dir.join("SKILL.md").display()
+    );
 
     // 3. Wire the hooks into settings.json (idempotent, with a backup).
     wire_settings(&claude.join("settings.json"), &fleet)?;
@@ -122,7 +143,9 @@ fn wire_settings(path: &Path, fleet: &Path) -> Result<()> {
             .context("settings.json `hooks` is not an object")?;
         for (event, script, arg) in WIRING {
             let command = hook_command(fleet, script, *arg);
-            let blocks = hooks.entry((*event).to_string()).or_insert_with(|| json!([]));
+            let blocks = hooks
+                .entry((*event).to_string())
+                .or_insert_with(|| json!([]));
             let arr = blocks
                 .as_array_mut()
                 .with_context(|| format!("hooks.{event} is not an array"))?;
