@@ -13,14 +13,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::{
+    Router,
     extract::{Request, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     middleware::{self, Next},
     response::Response,
-    Router,
 };
 use rmcp::transport::streamable_http_server::{
-    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 use tokio_util::sync::CancellationToken;
 

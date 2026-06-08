@@ -20,7 +20,7 @@ jobs:
       - run: cargo test --workspace
 
   lint:
-    name: fmt + clippy (informational)
+    name: fmt + clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,6 +29,4 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-        continue-on-error: true
-      - run: cargo clippy --workspace --all-targets
-        continue-on-error: true
+      - run: cargo clippy --workspace --all-targets -- -D warnings

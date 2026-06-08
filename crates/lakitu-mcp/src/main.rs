@@ -12,6 +12,14 @@
 //!   * `install-hooks` — materialize the lifecycle hooks + coordination skill
 //!     into `~/.claude` (see `install.rs`).
 
+// Nested `if`s are deliberate for readability; `nonminimal_bool` is allowed so
+// `set_state`'s guard can stay written the way the shell hook expresses it.
+#![allow(
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::nonminimal_bool
+)]
+
 mod daemon;
 mod fleet;
 mod install;
@@ -23,7 +31,7 @@ mod wire;
 use std::fs::OpenOptions;
 
 use anyhow::Result;
-use rmcp::{transport::stdio, ServiceExt};
+use rmcp::{ServiceExt, transport::stdio};
 use server::AgentBoardService;
 
 #[tokio::main]

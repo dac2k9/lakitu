@@ -5,11 +5,11 @@
 //! axum 0.8 path-param syntax is `{name}`.
 
 use axum::{
+    Json, Router,
     extract::Path,
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
-    Json, Router,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -22,12 +22,18 @@ pub fn router() -> Router {
         // Reads
         .route("/v1/snapshot", get(snapshot))
         // Hook-backing endpoints
-        .route("/v1/agents/{name}/state", patch(set_state).delete(set_offline))
+        .route(
+            "/v1/agents/{name}/state",
+            patch(set_state).delete(set_offline),
+        )
         .route("/v1/agents/{name}/unread-count", get(unread_count))
         .route("/v1/agents/{name}/context", put(put_context))
         .route("/v1/agents/{name}/persona", get(get_persona))
         .route("/v1/agents/{name}/tasks", get(tasks_list).post(task_add))
-        .route("/v1/agents/{name}/tasks/{id}", patch(task_set_done).delete(task_drop))
+        .route(
+            "/v1/agents/{name}/tasks/{id}",
+            patch(task_set_done).delete(task_drop),
+        )
         // Cockpit writes
         .route("/v1/register", post(register))
         .route("/v1/messages", post(send_message))
@@ -35,7 +41,10 @@ pub fn router() -> Router {
         .route("/v1/messages/read", post(mark_read))
         .route("/v1/messages/delete", post(delete_message))
         .route("/v1/projects", post(create_project))
-        .route("/v1/projects/{id}", patch(rename_project).delete(remove_project))
+        .route(
+            "/v1/projects/{id}",
+            patch(rename_project).delete(remove_project),
+        )
         .route("/v1/projects/{id}/move", post(move_project))
         .route("/v1/projects/{id}/coordinator", post(toggle_coordinator))
         .route("/v1/projects/membership", put(set_membership))
@@ -87,8 +96,15 @@ struct ContextReq {
 
 /// statusLine usage write (PUT) — the HTTP form of `context-statusline.sh`.
 async fn put_context(Path(name): Path<String>, Json(req): Json<ContextReq>) -> StatusCode {
-    match fleet::write_context(&name, req.pct, req.rl5h, req.rl7d, req.rl5h_reset, req.rl7d_reset)
-        .await
+    match fleet::write_context(
+        &name,
+        req.pct,
+        req.rl5h,
+        req.rl7d,
+        req.rl5h_reset,
+        req.rl7d_reset,
+    )
+    .await
     {
         Ok(()) => StatusCode::NO_CONTENT,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -203,7 +219,10 @@ struct BroadcastReq {
 async fn broadcast(Json(req): Json<BroadcastReq>) -> Json<serde_json::Value> {
     let mut delivered = 0u32;
     for to in &req.recipients {
-        if fleet::send_message(&req.from, to, &req.title, &req.body).await.is_ok() {
+        if fleet::send_message(&req.from, to, &req.title, &req.body)
+            .await
+            .is_ok()
+        {
             delivered += 1;
         }
     }

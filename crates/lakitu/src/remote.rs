@@ -57,7 +57,8 @@ impl RemoteClient {
     // ---- writes (fire-and-forget; the poll reflects the result) ----
 
     pub async fn register(&self, name: &str) {
-        self.post("/v1/register", &serde_json::json!({ "name": name })).await;
+        self.post("/v1/register", &serde_json::json!({ "name": name }))
+            .await;
     }
 
     pub async fn send_message(&self, from: &str, to: &str, title: &str, body: &str) {
@@ -77,15 +78,24 @@ impl RemoteClient {
     }
 
     pub async fn mark_read(&self, owner: &str, id: &str) {
-        self.post("/v1/messages/read", &serde_json::json!({ "owner": owner, "id": id })).await;
+        self.post(
+            "/v1/messages/read",
+            &serde_json::json!({ "owner": owner, "id": id }),
+        )
+        .await;
     }
 
     pub async fn delete_message(&self, owner: &str, id: &str) {
-        self.post("/v1/messages/delete", &serde_json::json!({ "owner": owner, "id": id })).await;
+        self.post(
+            "/v1/messages/delete",
+            &serde_json::json!({ "owner": owner, "id": id }),
+        )
+        .await;
     }
 
     pub async fn create_project(&self, name: &str) {
-        self.post("/v1/projects", &serde_json::json!({ "name": name })).await;
+        self.post("/v1/projects", &serde_json::json!({ "name": name }))
+            .await;
     }
 
     pub async fn rename_project(&self, id: &str, name: &str) {
@@ -98,11 +108,13 @@ impl RemoteClient {
     }
 
     pub async fn move_project_down(&self, id: &str) {
-        self.send(self.http.post(self.url(&format!("/v1/projects/{id}/move")))).await;
+        self.send(self.http.post(self.url(&format!("/v1/projects/{id}/move"))))
+            .await;
     }
 
     pub async fn remove_project(&self, id: &str) {
-        self.send(self.http.delete(self.url(&format!("/v1/projects/{id}")))).await;
+        self.send(self.http.delete(self.url(&format!("/v1/projects/{id}"))))
+            .await;
     }
 
     pub async fn set_membership(&self, client: &str, project_id: Option<&str>) {
@@ -123,7 +135,8 @@ impl RemoteClient {
     }
 
     pub async fn disconnect_client(&self, name: &str) {
-        self.send(self.http.delete(self.url(&format!("/v1/agents/{name}")))).await;
+        self.send(self.http.delete(self.url(&format!("/v1/agents/{name}"))))
+            .await;
     }
 
     pub async fn add_task(
@@ -145,7 +158,8 @@ impl RemoteClient {
         if let Some(m) = from_msg {
             payload["from_msg"] = serde_json::json!(m);
         }
-        self.post(&format!("/v1/agents/{owner}/tasks"), &payload).await;
+        self.post(&format!("/v1/agents/{owner}/tasks"), &payload)
+            .await;
     }
 
     pub async fn set_task_done(&self, owner: &str, id: &str, done: bool) {
@@ -158,7 +172,11 @@ impl RemoteClient {
     }
 
     pub async fn drop_task(&self, owner: &str, id: &str) {
-        self.send(self.http.delete(self.url(&format!("/v1/agents/{owner}/tasks/{id}")))).await;
+        self.send(
+            self.http
+                .delete(self.url(&format!("/v1/agents/{owner}/tasks/{id}"))),
+        )
+        .await;
     }
 
     async fn post(&self, path: &str, body: &serde_json::Value) {
@@ -180,16 +198,41 @@ impl RemoteClient {
 /// handler to a background task, which applies it locally or over HTTP.
 pub enum WriteCmd {
     Register(String),
-    SendMessage { from: String, to: String, title: String, body: String },
-    Broadcast { from: String, recipients: Vec<String>, title: String, body: String },
-    MarkRead { owner: String, id: String },
-    DeleteMessage { owner: String, id: String },
+    SendMessage {
+        from: String,
+        to: String,
+        title: String,
+        body: String,
+    },
+    Broadcast {
+        from: String,
+        recipients: Vec<String>,
+        title: String,
+        body: String,
+    },
+    MarkRead {
+        owner: String,
+        id: String,
+    },
+    DeleteMessage {
+        owner: String,
+        id: String,
+    },
     CreateProject(String),
-    RenameProject { id: String, name: String },
+    RenameProject {
+        id: String,
+        name: String,
+    },
     MoveProjectDown(String),
     RemoveProject(String),
-    SetMembership { client: String, project_id: Option<String> },
-    ToggleCoordinator { id: String, client: String },
+    SetMembership {
+        client: String,
+        project_id: Option<String>,
+    },
+    ToggleCoordinator {
+        id: String,
+        client: String,
+    },
     Disconnect(String),
     AddTask {
         owner: String,
@@ -198,8 +241,15 @@ pub enum WriteCmd {
         pr: Option<(String, u64)>,
         from_msg: Option<String>,
     },
-    SetTaskDone { owner: String, id: String, done: bool },
-    DropTask { owner: String, id: String },
+    SetTaskDone {
+        owner: String,
+        id: String,
+        done: bool,
+    },
+    DropTask {
+        owner: String,
+        id: String,
+    },
 }
 
 /// Apply one write against the active source (local files or the remote daemon).
@@ -215,10 +265,18 @@ fn apply_local(root: &std::path::Path, cmd: WriteCmd) {
     use WriteCmd::*;
     let r: std::io::Result<()> = match cmd {
         Register(name) => c::register_me(root, &name),
-        SendMessage { from, to, title, body } => {
-            c::send_message(root, &from, &to, &title, &body).map(|_| ())
-        }
-        Broadcast { from, recipients, title, body } => {
+        SendMessage {
+            from,
+            to,
+            title,
+            body,
+        } => c::send_message(root, &from, &to, &title, &body).map(|_| ()),
+        Broadcast {
+            from,
+            recipients,
+            title,
+            body,
+        } => {
             c::broadcast(root, &from, &recipients, &title, &body);
             Ok(())
         }
@@ -233,9 +291,21 @@ fn apply_local(root: &std::path::Path, cmd: WriteCmd) {
         }
         ToggleCoordinator { id, client } => c::toggle_coordinator(root, &id, &client).map(|_| ()),
         Disconnect(name) => c::disconnect_client(root, &name).map(|_| ()),
-        AddTask { owner, text, body, pr, from_msg } => {
-            c::add_task(root, &owner, &text, body.as_deref(), pr, from_msg.as_deref()).map(|_| ())
-        }
+        AddTask {
+            owner,
+            text,
+            body,
+            pr,
+            from_msg,
+        } => c::add_task(
+            root,
+            &owner,
+            &text,
+            body.as_deref(),
+            pr,
+            from_msg.as_deref(),
+        )
+        .map(|_| ()),
         SetTaskDone { owner, id, done } => c::set_task_done(root, &owner, &id, done),
         DropTask { owner, id } => c::drop_task(root, &owner, &id),
     };
@@ -248,10 +318,18 @@ async fn apply_remote(rc: &RemoteClient, cmd: WriteCmd) {
     use WriteCmd::*;
     match cmd {
         Register(name) => rc.register(&name).await,
-        SendMessage { from, to, title, body } => rc.send_message(&from, &to, &title, &body).await,
-        Broadcast { from, recipients, title, body } => {
-            rc.broadcast(&from, &recipients, &title, &body).await
-        }
+        SendMessage {
+            from,
+            to,
+            title,
+            body,
+        } => rc.send_message(&from, &to, &title, &body).await,
+        Broadcast {
+            from,
+            recipients,
+            title,
+            body,
+        } => rc.broadcast(&from, &recipients, &title, &body).await,
         MarkRead { owner, id } => rc.mark_read(&owner, &id).await,
         DeleteMessage { owner, id } => rc.delete_message(&owner, &id).await,
         CreateProject(name) => rc.create_project(&name).await,
@@ -263,8 +341,15 @@ async fn apply_remote(rc: &RemoteClient, cmd: WriteCmd) {
         }
         ToggleCoordinator { id, client } => rc.toggle_coordinator(&id, &client).await,
         Disconnect(name) => rc.disconnect_client(&name).await,
-        AddTask { owner, text, body, pr, from_msg } => {
-            rc.add_task(&owner, &text, body.as_deref(), pr, from_msg.as_deref()).await
+        AddTask {
+            owner,
+            text,
+            body,
+            pr,
+            from_msg,
+        } => {
+            rc.add_task(&owner, &text, body.as_deref(), pr, from_msg.as_deref())
+                .await
         }
         SetTaskDone { owner, id, done } => rc.set_task_done(&owner, &id, done).await,
         DropTask { owner, id } => rc.drop_task(&owner, &id).await,
@@ -366,7 +451,10 @@ impl SnapshotDto {
                 description: a.description,
                 state: AgentState::parse(&a.state),
                 task: a.task,
-                last_seen: a.last_seen.as_deref().and_then(|t| DateTime::parse_from_rfc3339(t).ok()),
+                last_seen: a
+                    .last_seen
+                    .as_deref()
+                    .and_then(|t| DateTime::parse_from_rfc3339(t).ok()),
                 stale: a.stale,
                 unread: a.unread as usize,
                 context_pct: a.context_pct,
@@ -380,7 +468,10 @@ impl SnapshotDto {
                     .into_iter()
                     .map(|m| Message {
                         id: m.id,
-                        time: m.time.as_deref().and_then(|t| DateTime::parse_from_rfc3339(t).ok()),
+                        time: m
+                            .time
+                            .as_deref()
+                            .and_then(|t| DateTime::parse_from_rfc3339(t).ok()),
                         from: m.from,
                         title: m.title,
                         body: m.body,
@@ -415,7 +506,10 @@ impl SnapshotDto {
                             .created
                             .as_deref()
                             .and_then(|s| DateTime::parse_from_rfc3339(s).ok()),
-                        pr: t.pr.map(|p| TaskPr { repo: p.repo, number: p.number }),
+                        pr: t.pr.map(|p| TaskPr {
+                            repo: p.repo,
+                            number: p.number,
+                        }),
                         from_msg: t.from_msg,
                     })
                     .collect();
@@ -429,6 +523,12 @@ impl SnapshotDto {
             five_hour_reset: u.five_hour_reset,
             seven_day_reset: u.seven_day_reset,
         });
-        StoreSnapshot { agents, inboxes, tasks, projects, usage }
+        StoreSnapshot {
+            agents,
+            inboxes,
+            tasks,
+            projects,
+            usage,
+        }
     }
 }

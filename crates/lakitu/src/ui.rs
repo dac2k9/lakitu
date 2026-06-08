@@ -14,6 +14,7 @@
 //! Each `#N` token is recorded as a `ClickTarget` so the mouse handler
 //! in `app.rs` can map clicks back to GitHub URLs.
 
+use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -22,7 +23,6 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Widget,
     Wrap,
 };
-use ratatui::Frame;
 
 use crate::app::{App, ClickTarget, ComposeField, FocusMode, TreeRow};
 use crate::event::{Event, RefKind};
@@ -206,14 +206,18 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::raw("  ·  filter: "));
         spans.push(Span::styled(
             filter.clone(),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ));
     }
     // Persistent badge when the inbox-waker is on (visible in every focus mode).
     if app.waker_running() {
         spans.push(Span::styled(
             "  ⚡ waker",
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         ));
     }
     // Unmissable alert: clients blocked on the SUPERVISOR (not peers) need you.
@@ -256,11 +260,15 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::raw("  ·  "));
         spans.push(Span::styled(
             "↗ open ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
             target.url.clone(),
-            Style::default().fg(Color::LightBlue).add_modifier(Modifier::UNDERLINED),
+            Style::default()
+                .fg(Color::LightBlue)
+                .add_modifier(Modifier::UNDERLINED),
         ));
     } else {
         spans.push(Span::styled("   ? ", Style::default().fg(SECONDARY_FG)));
@@ -317,7 +325,10 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         cells.push(dim(" "));
         // Reserve the top-right corner for the mascot avatar so the chip clears it.
         let reserve = ICON_W + 1;
-        let uw = (cells.iter().map(|s| s.content.chars().count()).sum::<usize>() as u16)
+        let uw = (cells
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum::<usize>() as u16)
             .min(area.width.saturating_sub(reserve));
         let urect = Rect {
             x: area.x + area.width.saturating_sub(uw + reserve),
@@ -361,7 +372,11 @@ fn fmt_reset(secs: i64) -> String {
     let s = secs.max(0);
     let (d, h, m) = (s / 86400, (s % 86400) / 3600, (s % 3600) / 60);
     if d > 0 {
-        if h > 0 { format!("{d}d{h}h") } else { format!("{d}d") }
+        if h > 0 {
+            format!("{d}d{h}h")
+        } else {
+            format!("{d}d")
+        }
     } else if h > 0 {
         format!("{h}h{m}m")
     } else {
@@ -382,7 +397,8 @@ struct ClientGroup {
 /// registered client. Returns owned data (clones), so callers can mutate App.
 fn client_tree(app: &App) -> Vec<ClientGroup> {
     let items = visible_work_items(app);
-    let repos: std::collections::HashSet<&str> = app.roster.iter().map(|a| a.repo.as_str()).collect();
+    let repos: std::collections::HashSet<&str> =
+        app.roster.iter().map(|a| a.repo.as_str()).collect();
     let mut groups: Vec<ClientGroup> = app
         .roster
         .iter()
@@ -390,7 +406,11 @@ fn client_tree(app: &App) -> Vec<ClientGroup> {
         .map(|(i, agent)| ClientGroup {
             client: Some(i),
             key: agent.name.clone(),
-            items: items.iter().filter(|w| w.repo == agent.repo).cloned().collect(),
+            items: items
+                .iter()
+                .filter(|w| w.repo == agent.repo)
+                .cloned()
+                .collect(),
         })
         .collect();
     let unassigned: Vec<WorkItem> = items
@@ -554,9 +574,15 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
             format!(
                 " Clients ({}){} ",
                 app.roster.len(),
-                if app.show_client_tasks { "" } else { " · tasks hidden" }
+                if app.show_client_tasks {
+                    ""
+                } else {
+                    " · tasks hidden"
+                }
             ),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -619,7 +645,12 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
                 Paragraph::new(Line::from(spans)).style(style).render(
-                    Rect { x: inner.x, y: row_y, width: inner.width, height: 1 },
+                    Rect {
+                        x: inner.x,
+                        y: row_y,
+                        width: inner.width,
+                        height: 1,
+                    },
                     &mut cbuf,
                 );
                 rows.push(TreeRow::Project(*idx));
@@ -661,8 +692,7 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
                     .unwrap_or(false);
                 let linkable = repo_url(repo).is_some() && exists;
                 // Agent tasks hide behind the Tab toggle; the human's always show.
-                let show_tasks =
-                    app.show_client_tasks || app.roster[i].kind == ClientKind::Human;
+                let show_tasks = app.show_client_tasks || app.roster[i].kind == ClientKind::Human;
                 let open_tasks = if show_tasks {
                     app.tasks
                         .get(&app.roster[i].name)
@@ -683,7 +713,12 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
                     open_tasks,
                 );
                 Paragraph::new(line).style(style).render(
-                    Rect { x: inner.x, y: row_y, width: inner.width, height: 1 },
+                    Rect {
+                        x: inner.x,
+                        y: row_y,
+                        width: inner.width,
+                        height: 1,
+                    },
                     &mut cbuf,
                 );
                 // The role chip links to the agent's repo (see build_agent_line).
@@ -709,7 +744,12 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
                             Style::default().fg(SECONDARY_FG)
                         };
                         Paragraph::new(Span::styled(s, st)).render(
-                            Rect { x: inner.x + inner.width - w, y: row_y, width: w, height: 1 },
+                            Rect {
+                                x: inner.x + inner.width - w,
+                                y: row_y,
+                                width: w,
+                                height: 1,
+                            },
                             &mut cbuf,
                         );
                     }
@@ -723,11 +763,18 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
                     Span::styled(format!("{marker} "), Style::default().fg(SECONDARY_FG)),
                     Span::styled(
                         format!("Unassigned ({})", group.items.len()),
-                        Style::default().fg(SECONDARY_FG).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(SECONDARY_FG)
+                            .add_modifier(Modifier::BOLD),
                     ),
                 ]))
                 .render(
-                    Rect { x: inner.x, y: row_y, width: inner.width, height: 1 },
+                    Rect {
+                        x: inner.x,
+                        y: row_y,
+                        width: inner.width,
+                        height: 1,
+                    },
                     &mut cbuf,
                 );
             }
@@ -767,8 +814,11 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
             _ => Vec::new(),
         };
         // Whose list the tasks belong to — used to make them selectable rows.
-        let task_owner =
-            group.client.and_then(|i| app.roster.get(i)).map(|a| a.name.clone()).unwrap_or_default();
+        let task_owner = group
+            .client
+            .and_then(|i| app.roster.get(i))
+            .map(|a| a.name.clone())
+            .unwrap_or_default();
 
         let item_rows = if collapsed { 0 } else { group.items.len() };
         // One clipped line per open task (full text lives in the modal).
@@ -806,7 +856,12 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
                 st = st.add_modifier(Modifier::DIM);
             }
             Paragraph::new(Line::from(Span::styled(sl.clone(), st))).render(
-                Rect { x: box_inner.x, y: box_inner.y + off, width: box_inner.width, height: 1 },
+                Rect {
+                    x: box_inner.x,
+                    y: box_inner.y + off,
+                    width: box_inner.width,
+                    height: 1,
+                },
                 &mut cbuf,
             );
             off += 1;
@@ -824,11 +879,17 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
                 let meta_issue = w
                     .issue
                     .and_then(|n| app.titles.get(&(RefKind::Issue, n)).cloned().flatten());
-                let meta_pr = w
-                    .pr
-                    .and_then(|n| app.titles.get(&(RefKind::Pr, n)).cloned().flatten());
-                let (line, refs) =
-                    build_work_item_line(w, meta_issue.as_ref(), meta_pr.as_ref(), item_w, item_x, iy, app);
+                let meta_pr =
+                    w.pr.and_then(|n| app.titles.get(&(RefKind::Pr, n)).cloned().flatten());
+                let (line, refs) = build_work_item_line(
+                    w,
+                    meta_issue.as_ref(),
+                    meta_pr.as_ref(),
+                    item_w,
+                    item_x,
+                    iy,
+                    app,
+                );
                 let mut style = Style::default();
                 if matches!(
                     w.state,
@@ -840,7 +901,12 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
                 Paragraph::new(line).style(style).render(
-                    Rect { x: item_x, y: iy, width: item_w, height: 1 },
+                    Rect {
+                        x: item_x,
+                        y: iy,
+                        width: item_w,
+                        height: 1,
+                    },
                     &mut cbuf,
                 );
                 for (col_start, col_end, url) in refs {
@@ -876,10 +942,17 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
                     } else {
                         Style::default()
                     };
-                    Paragraph::new(task_line(t, stale, true, box_inner.width)).style(st).render(
-                        Rect { x: box_inner.x, y: box_inner.y + off, width: box_inner.width, height: 1 },
-                        &mut cbuf,
-                    );
+                    Paragraph::new(task_line(t, stale, true, box_inner.width))
+                        .style(st)
+                        .render(
+                            Rect {
+                                x: box_inner.x,
+                                y: box_inner.y + off,
+                                width: box_inner.width,
+                                height: 1,
+                            },
+                            &mut cbuf,
+                        );
                     off += 1;
                 }
             }
@@ -906,10 +979,17 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
             } else {
                 Style::default()
             };
-            Paragraph::new(task_line(t, stale, false, box_inner.width)).style(st).render(
-                Rect { x: box_inner.x, y: box_inner.y + off, width: box_inner.width, height: 1 },
-                &mut cbuf,
-            );
+            Paragraph::new(task_line(t, stale, false, box_inner.width))
+                .style(st)
+                .render(
+                    Rect {
+                        x: box_inner.x,
+                        y: box_inner.y + off,
+                        width: box_inner.width,
+                        height: 1,
+                    },
+                    &mut cbuf,
+                );
             off += 1;
         }
 
@@ -944,7 +1024,11 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
     // with j/k scrolls the dashboard once it overflows.
     let sel_y = row_ys.get(app.tree_selected).copied().unwrap_or(0);
     let max_scroll = content_h.saturating_sub(avail);
-    let scroll = if sel_y >= avail { (sel_y + 1 - avail).min(max_scroll) } else { 0 };
+    let scroll = if sel_y >= avail {
+        (sel_y + 1 - avail).min(max_scroll)
+    } else {
+        0
+    };
 
     {
         let fbuf = frame.buffer_mut();
@@ -981,12 +1065,17 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
     let bx = inner.x + inner.width; // right border column
     if scroll > 0 {
         if let Some(c) = frame.buffer_mut().cell_mut((bx, inner.y)) {
-            c.set_symbol("↑").set_style(Style::default().fg(Color::Cyan));
+            c.set_symbol("↑")
+                .set_style(Style::default().fg(Color::Cyan));
         }
     }
     if scroll + avail < content_h {
-        if let Some(c) = frame.buffer_mut().cell_mut((bx, inner.y + avail.saturating_sub(1))) {
-            c.set_symbol("↓").set_style(Style::default().fg(Color::Cyan));
+        if let Some(c) = frame
+            .buffer_mut()
+            .cell_mut((bx, inner.y + avail.saturating_sub(1)))
+        {
+            c.set_symbol("↓")
+                .set_style(Style::default().fg(Color::Cyan));
         }
     }
 }
@@ -1032,11 +1121,15 @@ fn build_agent_line(
             marker_span,
             Span::styled(
                 " ◆ ",
-                Style::default().fg(Color::Rgb(120, 200, 255)).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Rgb(120, 200, 255))
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("{:<14}", clip(&a.name, 14)),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
             Span::styled(
@@ -1048,7 +1141,9 @@ fn build_agent_line(
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
                 format!("✉ {}", a.unread),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
         if open_tasks > 0 {
@@ -1069,11 +1164,15 @@ fn build_agent_line(
         format!("{:<14}", clip(&a.name, 14))
     };
     let name_style = if is_leader {
-        Style::default().fg(Color::Rgb(220, 130, 40)).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Rgb(220, 130, 40))
+            .add_modifier(Modifier::BOLD)
     } else if a.state == AgentState::Idle {
         Style::default().fg(Color::Rgb(170, 170, 170))
     } else {
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
     };
     let mut spans = vec![
         marker_span,
@@ -1116,13 +1215,18 @@ fn build_agent_line(
     // beneath the node (see `render_agents_pane`), not inline here.
     if let Some(ts) = a.last_seen {
         spans.push(Span::raw("  "));
-        spans.push(Span::styled(age_string(ts), Style::default().fg(SECONDARY_FG)));
+        spans.push(Span::styled(
+            age_string(ts),
+            Style::default().fg(SECONDARY_FG),
+        ));
     }
     if a.unread > 0 {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             format!("✉ {}", a.unread),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ));
     }
     // Open-task count — a glanceable "this client has N reminders" chip, trailing
@@ -1209,7 +1313,9 @@ fn state_indicator(state: AgentState, stale: bool, tick: usize) -> Span<'static>
         // with the other dots, and reads as "dormant, no signal".
         return Span::styled(
             " ○ ".to_string(),
-            Style::default().fg(SECONDARY_FG).add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(SECONDARY_FG)
+                .add_modifier(Modifier::DIM),
         );
     }
     match state {
@@ -1277,7 +1383,11 @@ fn wrap_text(text: &str, width: u16) -> Vec<String> {
             continue;
         }
         let cur_len = cur.chars().count();
-        let need = if cur_len == 0 { word.chars().count() } else { cur_len + 1 + word.chars().count() };
+        let need = if cur_len == 0 {
+            word.chars().count()
+        } else {
+            cur_len + 1 + word.chars().count()
+        };
         if need > width {
             lines.push(std::mem::take(&mut cur));
             cur = word.to_string();
@@ -1330,12 +1440,11 @@ fn is_meta_done(app: &App, w: &WorkItem) -> bool {
         .and_then(|m| m.as_ref())
         .map(|m| m.closed)
         .unwrap_or(false);
-    let pr_done = w
-        .pr
-        .and_then(|p| app.titles.get(&(RefKind::Pr, p)))
-        .and_then(|m| m.as_ref())
-        .map(|m| m.merged || m.closed)
-        .unwrap_or(false);
+    let pr_done =
+        w.pr.and_then(|p| app.titles.get(&(RefKind::Pr, p)))
+            .and_then(|m| m.as_ref())
+            .map(|m| m.merged || m.closed)
+            .unwrap_or(false);
     issue_closed || pr_done
 }
 
@@ -1382,27 +1491,27 @@ fn visible_work_items(app: &App) -> Vec<WorkItem> {
             // finished items (Merged / gh-merged/closed, no card-done yet) stay
             // until dismissed with `x` (acknowledged) — or immediately if
             // ticketless (nothing to retire).
-            let finished = matches!(w.state, crate::work::WorkState::Merged)
-                || is_meta_done(app, w);
+            let finished =
+                matches!(w.state, crate::work::WorkState::Merged) || is_meta_done(app, w);
             let retire = w.state == crate::work::WorkState::Done
-                || (finished && w.issue.map_or(true, |i| app.acknowledged.contains(&i)));
+                || (finished && w.issue.is_none_or(|i| app.acknowledged.contains(&i)));
             !retire
         })
         .cloned()
         .collect();
-    items.sort_by(|a, b| is_meta_done(app, a).cmp(&is_meta_done(app, b)));
+    items.sort_by_key(|a| is_meta_done(app, a));
     items
 }
 
 fn render_work_items(frame: &mut Frame, area: Rect, app: &mut App) {
     let items = visible_work_items(app);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(
-            " Work items ",
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-        ));
+    let block = Block::default().borders(Borders::ALL).title(Span::styled(
+        " Work items ",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1434,7 +1543,12 @@ fn render_work_items(frame: &mut Frame, area: Rect, app: &mut App) {
             let divider = build_done_divider(inner.width);
             frame.render_widget(
                 Paragraph::new(divider),
-                Rect { x: inner.x, y: row_y, width: inner.width, height: 1 },
+                Rect {
+                    x: inner.x,
+                    y: row_y,
+                    width: inner.width,
+                    height: 1,
+                },
             );
             row_y += 1;
             rendered += 1;
@@ -1446,9 +1560,8 @@ fn render_work_items(frame: &mut Frame, area: Rect, app: &mut App) {
         let meta_issue: Option<Meta> = w
             .issue
             .and_then(|i| app.titles.get(&(RefKind::Issue, i)).cloned().flatten());
-        let meta_pr: Option<Meta> = w
-            .pr
-            .and_then(|p| app.titles.get(&(RefKind::Pr, p)).cloned().flatten());
+        let meta_pr: Option<Meta> =
+            w.pr.and_then(|p| app.titles.get(&(RefKind::Pr, p)).cloned().flatten());
 
         let max_width = inner.width;
         let (line, refs) = build_work_item_line(
@@ -1465,9 +1578,8 @@ fn render_work_items(frame: &mut Frame, area: Rect, app: &mut App) {
         if is_done {
             row_style = row_style.add_modifier(Modifier::DIM);
         }
-        let is_selected_done = is_done
-            && app.focus_mode == FocusMode::DoneReview
-            && done_idx == app.done_selected;
+        let is_selected_done =
+            is_done && app.focus_mode == FocusMode::DoneReview && done_idx == app.done_selected;
         if is_selected_done {
             row_style = row_style.add_modifier(Modifier::REVERSED);
         }
@@ -1475,7 +1587,12 @@ fn render_work_items(frame: &mut Frame, area: Rect, app: &mut App) {
         let para = Paragraph::new(line).style(row_style);
         frame.render_widget(
             para,
-            Rect { x: inner.x, y: row_y, width: inner.width, height: 1 },
+            Rect {
+                x: inner.x,
+                y: row_y,
+                width: inner.width,
+                height: 1,
+            },
         );
 
         for (col_start, col_end, url) in refs {
@@ -1527,7 +1644,9 @@ fn build_work_item_line<'a>(
     };
     spans.push(Span::styled(
         format!("{label_text:<17}"),
-        Style::default().fg(label_color).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(label_color)
+            .add_modifier(Modifier::BOLD),
     ));
     col += 17;
 
@@ -1544,7 +1663,11 @@ fn build_work_item_line<'a>(
         let hover = is_hovered(app, row_y, pane_x + start, pane_x + start + len);
         spans.push(Span::styled(
             text,
-            if hover { hover_ref_style() } else { normal_ref_style() },
+            if hover {
+                hover_ref_style()
+            } else {
+                normal_ref_style()
+            },
         ));
         targets.push((start, start + len, RefKind::Issue.url(&w.repo, issue)));
         let pad = ISSUE_W.saturating_sub(len);
@@ -1567,7 +1690,11 @@ fn build_work_item_line<'a>(
         let hover = is_hovered(app, row_y, pane_x + start, pane_x + start + len);
         spans.push(Span::styled(
             text,
-            if hover { hover_ref_style() } else { normal_ref_style() },
+            if hover {
+                hover_ref_style()
+            } else {
+                normal_ref_style()
+            },
         ));
         targets.push((start, start + len, RefKind::Pr.url(&w.repo, pr)));
         let pad = PR_W.saturating_sub(len);
@@ -1599,7 +1726,10 @@ fn build_work_item_line<'a>(
     // 6. Optional note (e.g. reason for Skipped, current= for Owned).
     if !w.note.is_empty() {
         spans.push(Span::raw("  "));
-        spans.push(Span::styled(w.note.clone(), Style::default().fg(Color::Yellow)));
+        spans.push(Span::styled(
+            w.note.clone(),
+            Style::default().fg(Color::Yellow),
+        ));
     }
 
     // 7. Age.
@@ -1661,7 +1791,12 @@ fn render_event_list(frame: &mut Frame, area: Rect, app: &mut App) {
         .events
         .iter()
         .rev()
-        .filter(|e| app.skill_filter.as_ref().map(|f| &e.skill == f).unwrap_or(true))
+        .filter(|e| {
+            app.skill_filter
+                .as_ref()
+                .map(|f| &e.skill == f)
+                .unwrap_or(true)
+        })
         .collect();
 
     if visible.is_empty() {
@@ -1695,7 +1830,12 @@ fn render_event_list(frame: &mut Frame, area: Rect, app: &mut App) {
             let line = render_loop_start_divider(ev);
             frame.render_widget(
                 Paragraph::new(line),
-                Rect { x: inner.x, y: row_y, width: inner.width, height: 1 },
+                Rect {
+                    x: inner.x,
+                    y: row_y,
+                    width: inner.width,
+                    height: 1,
+                },
             );
             continue;
         }
@@ -1703,7 +1843,12 @@ fn render_event_list(frame: &mut Frame, area: Rect, app: &mut App) {
         let (line, refs) = build_event_line(ev, inner.x, row_y, is_selected, app);
         frame.render_widget(
             Paragraph::new(line),
-            Rect { x: inner.x, y: row_y, width: inner.width, height: 1 },
+            Rect {
+                x: inner.x,
+                y: row_y,
+                width: inner.width,
+                height: 1,
+            },
         );
 
         for (col_start, col_end, url) in refs {
@@ -1735,7 +1880,9 @@ fn build_event_line<'a>(
         Span::raw(" "),
         Span::styled(
             pad_to(&e.action, 22),
-            Style::default().fg(e.action_color()).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(e.action_color())
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
     ];
@@ -1753,9 +1900,17 @@ fn build_event_line<'a>(
         let hovered = is_hovered(app, row_y, col_start_abs, col_end_abs);
         spans.push(Span::styled(
             token,
-            if hovered { hover_ref_style() } else { normal_ref_style() },
+            if hovered {
+                hover_ref_style()
+            } else {
+                normal_ref_style()
+            },
         ));
-        targets.push((col_start_abs, col_end_abs, r.kind.url(&e.repo_with_owner(), r.number)));
+        targets.push((
+            col_start_abs,
+            col_end_abs,
+            r.kind.url(&e.repo_with_owner(), r.number),
+        ));
         cursor = r.start + r.len;
     }
     if cursor < details.len() {
@@ -1785,7 +1940,9 @@ fn render_loop_start_divider(e: &Event) -> Line<'_> {
         Span::styled("─── ", Style::default().fg(Color::Cyan)),
         Span::styled(
             "Loop start: ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             issue_label,
@@ -1817,10 +1974,16 @@ fn render_help_overlay(frame: &mut Frame, app: &mut App) {
             Style::default().add_modifier(Modifier::BOLD),
         )]),
         Line::from("  Agents + you: state dot · name · role · ✉ unread · ☐ open tasks · age."),
-        Line::from("  Dot: spins=working, ⚠=needs you, ◐=waiting on a peer, ●=idle, ○=stale. ◆ = you."),
+        Line::from(
+            "  Dot: spins=working, ⚠=needs you, ◐=waiting on a peer, ●=idle, ○=stale. ◆ = you.",
+        ),
         Line::from("  Below the node: the agent's current task in italics (what it's working on)."),
-        Line::from("  Each client's owned work-items (matched by repo) nest beneath it; ▾/▸ folds."),
-        Line::from("  Open tasks show as a checklist in the box — PR-linked ones nest under their PR row."),
+        Line::from(
+            "  Each client's owned work-items (matched by repo) nest beneath it; ▾/▸ folds.",
+        ),
+        Line::from(
+            "  Open tasks show as a checklist in the box — PR-linked ones nest under their PR row.",
+        ),
         Line::from(""),
         Line::from(vec![Span::styled(
             "Work items",
@@ -1834,9 +1997,14 @@ fn render_help_overlay(frame: &mut Frame, app: &mut App) {
             "Event stream",
             Style::default().add_modifier(Modifier::BOLD),
         )]),
-        Line::from("  Raw agent activity — chronological, color-coded. Hidden by default; press l."),
+        Line::from(
+            "  Raw agent activity — chronological, color-coded. Hidden by default; press l.",
+        ),
         Line::from(""),
-        Line::from(vec![Span::styled("Keys", Style::default().add_modifier(Modifier::BOLD))]),
+        Line::from(vec![Span::styled(
+            "Keys",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
         Line::from("  ↑/↓ or j/k    scroll"),
         Line::from("  Home/End      jump to first / last event"),
         Line::from("  s             cycle skill filter (all → board-issue-loop → pr-review-fixup)"),
@@ -1856,7 +2024,9 @@ fn render_help_overlay(frame: &mut Frame, app: &mut App) {
         )]),
         Line::from("  ↑/↓ or j/k    move between clients, their work-items, and tasks"),
         Line::from("  PgUp/PgDn     jump ~10 rows — the pane scrolls to follow the cursor"),
-        Line::from("  enter         client: inbox · ticket: open the PR · task: open the tasks list"),
+        Line::from(
+            "  enter         client: inbox · ticket: open the PR · task: open the tasks list",
+        ),
         Line::from("  shift+enter   on a ticket: open the issue (the board ticket)"),
         Line::from("  x             dismiss a finished (Done/Merged) ticket from the view"),
         Line::from("  space         fold / unfold the selected client's work-items"),
@@ -1930,7 +2100,11 @@ fn render_help_overlay(frame: &mut Frame, app: &mut App) {
         .iter()
         .map(|line| {
             let w: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-            if w <= iw { 1u16 } else { (((w + iw - 1) / iw) + 1) as u16 }
+            if w <= iw {
+                1u16
+            } else {
+                (w.div_ceil(iw) + 1) as u16
+            }
         })
         .sum();
     let max_scroll = total.saturating_sub(inner.height);
@@ -1942,7 +2116,8 @@ fn render_help_overlay(frame: &mut Frame, app: &mut App) {
         .scroll((app.help_scroll, 0));
     frame.render_widget(para, area);
     if max_scroll > 0 {
-        let mut sb = ScrollbarState::new(max_scroll as usize + 1).position(app.help_scroll as usize);
+        let mut sb =
+            ScrollbarState::new(max_scroll as usize + 1).position(app.help_scroll as usize);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("↑"))
@@ -1962,12 +2137,14 @@ fn build_done_divider(width: u16) -> Line<'static> {
     let dashes_total = (width as usize).saturating_sub(label.len() + 4);
     let left = "── ";
     let right_dashes = dashes_total.saturating_sub(left.len());
-    let right: String = std::iter::repeat('─').take(right_dashes).collect();
+    let right: String = std::iter::repeat_n('─', right_dashes).collect();
     Line::from(vec![
         Span::styled(left, Style::default().fg(SECONDARY_FG)),
         Span::styled(
             label.trim(),
-            Style::default().fg(SECONDARY_FG).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(SECONDARY_FG)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(right, Style::default().fg(SECONDARY_FG)),
@@ -2043,8 +2220,16 @@ fn render_inbox_modal(frame: &mut Frame, app: &mut App, name: &str) {
     // Reserve the right column for a scrollbar when there are more messages than
     // fit, so rows don't render under it.
     let overflow = msgs.len() > avail;
-    let row_w = if overflow { list_area.width.saturating_sub(1) } else { list_area.width };
-    let top = if avail > 0 && sel >= avail { sel + 1 - avail } else { 0 };
+    let row_w = if overflow {
+        list_area.width.saturating_sub(1)
+    } else {
+        list_area.width
+    };
+    let top = if avail > 0 && sel >= avail {
+        sel + 1 - avail
+    } else {
+        0
+    };
     for (i, m) in msgs.iter().enumerate().skip(top).take(avail) {
         let row_y = list_area.y + (i - top) as u16;
         let ts = m
@@ -2054,7 +2239,9 @@ fn render_inbox_modal(frame: &mut Frame, app: &mut App, name: &str) {
         let title_style = if m.read {
             Style::default().fg(Color::White)
         } else {
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
         };
         let is_tasked = tasked.contains(&m.id);
         let mut spans = vec![
@@ -2063,16 +2250,25 @@ fn render_inbox_modal(frame: &mut Frame, app: &mut App, name: &str) {
                 Style::default().fg(Color::Yellow),
             ),
             Span::styled(format!("{ts}  "), Style::default().fg(SECONDARY_FG)),
-            Span::styled(format!("{:<14}", clip(&m.from, 14)), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{:<14}", clip(&m.from, 14)),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::raw("  "),
             Span::styled(
-                clip(&m.title, row_w.saturating_sub(if is_tasked { 30 } else { 28 }) as usize),
+                clip(
+                    &m.title,
+                    row_w.saturating_sub(if is_tasked { 30 } else { 28 }) as usize,
+                ),
                 title_style,
             ),
         ];
         // A teal ☐ marks a message you've already turned into a task.
         if is_tasked {
-            spans.push(Span::styled(" ☐", Style::default().fg(Color::Rgb(150, 200, 180))));
+            spans.push(Span::styled(
+                " ☐",
+                Style::default().fg(Color::Rgb(150, 200, 180)),
+            ));
         }
         let mut row_style = Style::default();
         if i == sel {
@@ -2080,7 +2276,12 @@ fn render_inbox_modal(frame: &mut Frame, app: &mut App, name: &str) {
         }
         frame.render_widget(
             Paragraph::new(Line::from(spans)).style(row_style),
-            Rect { x: list_area.x, y: row_y, width: row_w, height: 1 },
+            Rect {
+                x: list_area.x,
+                y: row_y,
+                width: row_w,
+                height: 1,
+            },
         );
     }
     if overflow {
@@ -2101,7 +2302,9 @@ fn render_inbox_modal(frame: &mut Frame, app: &mut App, name: &str) {
             Span::styled("From: ", Style::default().fg(SECONDARY_FG)),
             Span::styled(
                 m.from.clone(),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("     "),
             Span::styled("Time: ", Style::default().fg(SECONDARY_FG)),
@@ -2124,14 +2327,21 @@ fn render_inbox_modal(frame: &mut Frame, app: &mut App, name: &str) {
         // private), clamp the offset, and show a scrollbar when the body
         // overflows. Reserve the right column for the bar; the TOP border row.
         let detail = parts[1];
-        let text_area = Rect { width: detail.width.saturating_sub(1), ..detail };
+        let text_area = Rect {
+            width: detail.width.saturating_sub(1),
+            ..detail
+        };
         let visible = detail.height.saturating_sub(1);
         let iw = text_area.width.max(1) as usize;
         let total: u16 = lines
             .iter()
             .map(|line| {
                 let w: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-                if w <= iw { 1 } else { (((w + iw - 1) / iw) + 1) as u16 }
+                if w <= iw {
+                    1
+                } else {
+                    (w.div_ceil(iw) + 1) as u16
+                }
             })
             .sum();
         let max_scroll = total.saturating_sub(visible);
@@ -2171,7 +2381,9 @@ fn render_agent_header(frame: &mut Frame, area: Rect, agent: Option<&Agent>) {
         Span::raw("   "),
         Span::styled(
             format!("[{}]", a.state.label()),
-            Style::default().fg(a.state.color()).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(a.state.color())
+                .add_modifier(Modifier::BOLD),
         ),
     ];
     if a.stale {
@@ -2186,7 +2398,9 @@ fn render_agent_header(frame: &mut Frame, area: Rect, agent: Option<&Agent>) {
         Line::from(vec![
             Span::styled(
                 "Helps with: ",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(helps, Style::default().fg(Color::White)),
         ]),
@@ -2197,12 +2411,17 @@ fn render_agent_header(frame: &mut Frame, area: Rect, agent: Option<&Agent>) {
 fn render_inbox_footer(frame: &mut Frame, area: Rect, delete_armed: bool) {
     // A pending delete takes over the footer with a confirm prompt.
     if delete_armed {
-        let warn = Style::default().fg(Color::Rgb(220, 130, 40)).add_modifier(Modifier::BOLD);
+        let warn = Style::default()
+            .fg(Color::Rgb(220, 130, 40))
+            .add_modifier(Modifier::BOLD);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("Delete this message? ", warn),
                 Span::styled("y", warn),
-                Span::styled(" to confirm · any other key cancels", Style::default().fg(SECONDARY_FG)),
+                Span::styled(
+                    " to confirm · any other key cancels",
+                    Style::default().fg(SECONDARY_FG),
+                ),
             ])),
             area,
         );
@@ -2318,8 +2537,16 @@ fn render_tasks_modal(frame: &mut Frame, app: &mut App, name: &str) {
         let n = rows.len();
         let avail = list_area.height as usize;
         let overflow = n > avail;
-        let roww = if overflow { list_area.width.saturating_sub(1) } else { list_area.width };
-        let top = if avail > 0 && sel_display >= avail { sel_display + 1 - avail } else { 0 };
+        let roww = if overflow {
+            list_area.width.saturating_sub(1)
+        } else {
+            list_area.width
+        };
+        let top = if avail > 0 && sel_display >= avail {
+            sel_display + 1 - avail
+        } else {
+            0
+        };
         for (di, (line, selected)) in rows.into_iter().enumerate().skip(top).take(avail) {
             let st = if selected {
                 Style::default().add_modifier(Modifier::REVERSED)
@@ -2328,7 +2555,12 @@ fn render_tasks_modal(frame: &mut Frame, app: &mut App, name: &str) {
             };
             frame.render_widget(
                 Paragraph::new(line).style(st),
-                Rect { x: list_area.x, y: list_area.y + (di - top) as u16, width: roww, height: 1 },
+                Rect {
+                    x: list_area.x,
+                    y: list_area.y + (di - top) as u16,
+                    width: roww,
+                    height: 1,
+                },
             );
         }
         if overflow {
@@ -2382,7 +2614,9 @@ fn render_tasks_modal(frame: &mut Frame, app: &mut App, name: &str) {
                 Line::from(""),
                 Line::from(Span::styled(
                     t.text.clone(),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
                 )),
             ];
             // The body (the "message") below the title, blank-line separated.
@@ -2410,7 +2644,9 @@ fn render_tasks_modal(frame: &mut Frame, app: &mut App, name: &str) {
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     "＋ ",
-                    Style::default().fg(Color::Rgb(150, 200, 180)).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Rgb(150, 200, 180))
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(buf.clone()),
                 Span::styled("▏", Style::default().fg(Color::White)),
@@ -2432,11 +2668,16 @@ fn task_modal_line(t: &crate::store::Task, max_w: usize) -> Line<'static> {
         Style::default().fg(Color::Rgb(150, 200, 180))
     };
     let text_style = if t.done {
-        Style::default().fg(SECONDARY_FG).add_modifier(Modifier::DIM)
+        Style::default()
+            .fg(SECONDARY_FG)
+            .add_modifier(Modifier::DIM)
     } else {
         Style::default().fg(Color::White)
     };
-    let age = t.created.map(|c| format!("  {}", age_string(c))).unwrap_or_default();
+    let age = t
+        .created
+        .map(|c| format!("  {}", age_string(c)))
+        .unwrap_or_default();
     let from = if t.from_msg.is_some() { "  ✉" } else { "" };
     let usable = max_w
         .saturating_sub(check.len() + age.chars().count() + from.chars().count())
@@ -2456,7 +2697,11 @@ fn task_modal_line(t: &crate::store::Task, max_w: usize) -> Line<'static> {
 
 fn render_tasks_footer(frame: &mut Frame, area: Rect, input_mode: bool) {
     let hint: Vec<(&str, &str)> = if input_mode {
-        vec![("type", " the task   "), ("Enter", " add   "), ("Esc", " cancel")]
+        vec![
+            ("type", " the task   "),
+            ("Enter", " add   "),
+            ("Esc", " cancel"),
+        ]
     } else {
         vec![
             ("j/k", " select   "),
@@ -2478,7 +2723,9 @@ fn render_tasks_footer(frame: &mut Frame, area: Rect, input_mode: bool) {
 /// (recipient / title / body); the focused field is highlighted and shows a
 /// block cursor. Owns keyboard input while open (see `handle_input`).
 fn render_compose_modal(frame: &mut Frame, app: &App) {
-    let Some(c) = app.compose.as_ref() else { return };
+    let Some(c) = app.compose.as_ref() else {
+        return;
+    };
     let area = centered_rect(70, 60, frame.area());
     frame.render_widget(ratatui::widgets::Clear, area);
 
@@ -2512,7 +2759,9 @@ fn render_compose_modal(frame: &mut Frame, app: &App) {
             Span::styled(
                 c.targets[c.target_idx].label(),
                 if rec_focused {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::White)
                 },
@@ -2530,7 +2779,11 @@ fn render_compose_modal(frame: &mut Frame, app: &App) {
     let title_line = if title_focused {
         let mut spans = vec![Span::styled("Title:   ", field_label_style(true))];
         // usize::MAX = never wrap — the title is a single row; take that one line.
-        spans.extend(lines_with_cursor(&c.title, c.title_cursor, usize::MAX).remove(0).spans);
+        spans.extend(
+            lines_with_cursor(&c.title, c.title_cursor, usize::MAX)
+                .remove(0)
+                .spans,
+        );
         Line::from(spans)
     } else {
         Line::from(vec![
@@ -2542,29 +2795,37 @@ fn render_compose_modal(frame: &mut Frame, app: &App) {
 
     // Body (wraps) — caret shown at its position (any line) when focused.
     let body_focused = c.field == ComposeField::Body;
-    let mut body_lines = vec![Line::from(Span::styled("Message:", field_label_style(body_focused)))];
+    let mut body_lines = vec![Line::from(Span::styled(
+        "Message:",
+        field_label_style(body_focused),
+    ))];
     if body_focused {
-        body_lines.extend(lines_with_cursor(&c.body, c.body_cursor, parts[2].width as usize));
+        body_lines.extend(lines_with_cursor(
+            &c.body,
+            c.body_cursor,
+            parts[2].width as usize,
+        ));
     } else {
         for l in c.body.split('\n') {
             body_lines.push(Line::from(Span::raw(l.to_string())));
         }
     }
-    frame.render_widget(
-        Paragraph::new(body_lines),
-        parts[2],
-    );
+    frame.render_widget(Paragraph::new(body_lines), parts[2]);
 
     // Footer / error / confirm prompt.
     let footer = if c.confirming {
         Line::from(vec![
             Span::styled(
                 format!("Send to {}?  ", c.targets[c.target_idx].label()),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "Enter/y",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" send   ", Style::default().fg(SECONDARY_FG)),
             Span::styled("Esc/n", Style::default().fg(SECONDARY_FG)),
@@ -2595,7 +2856,9 @@ fn render_compose_modal(frame: &mut Frame, app: &App) {
 /// First-run "pick your name" prompt (#D) — shown when no `me` is set.
 /// Confirm dialog for disconnecting a client (key `D` in the Clients pane).
 fn render_disconnect_confirm(frame: &mut Frame, app: &App) {
-    let Some(name) = app.confirm_disconnect.as_ref() else { return };
+    let Some(name) = app.confirm_disconnect.as_ref() else {
+        return;
+    };
     let area = centered_rect(60, 30, frame.area());
     frame.render_widget(ratatui::widgets::Clear, area);
     let lines = vec![
@@ -2608,7 +2871,9 @@ fn render_disconnect_confirm(frame: &mut Frame, app: &App) {
             Span::raw("Remove "),
             Span::styled(
                 name.clone(),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" from the cockpit?"),
         ]),
@@ -2616,7 +2881,10 @@ fn render_disconnect_confirm(frame: &mut Frame, app: &App) {
         Line::from("(Re-registers if the agent is still running.)"),
         Line::from(""),
         Line::from(vec![
-            Span::styled("Enter/y", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Enter/y",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" disconnect   ", Style::default().fg(SECONDARY_FG)),
             Span::styled("Esc/n", Style::default().fg(SECONDARY_FG)),
             Span::styled(" cancel", Style::default().fg(SECONDARY_FG)),
@@ -2629,7 +2897,9 @@ fn render_disconnect_confirm(frame: &mut Frame, app: &App) {
 }
 
 fn render_name_prompt(frame: &mut Frame, app: &App) {
-    let Some(buf) = app.name_prompt.as_ref() else { return };
+    let Some(buf) = app.name_prompt.as_ref() else {
+        return;
+    };
     let area = centered_rect(60, 35, frame.area());
     frame.render_widget(ratatui::widgets::Clear, area);
     let lines = vec![
@@ -2642,10 +2912,17 @@ fn render_name_prompt(frame: &mut Frame, app: &App) {
         Line::from("and you get your own inbox. Something memorable / stable."),
         Line::from(""),
         Line::from(vec![
-            Span::styled("Name: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Name: ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 buf.clone(),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("\u{2588}", Style::default().fg(Color::Cyan)),
         ]),
@@ -2665,7 +2942,9 @@ fn render_name_prompt(frame: &mut Frame, app: &App) {
 
 /// "New project" name prompt (key `P` in the Clients pane).
 fn render_new_project_modal(frame: &mut Frame, app: &App) {
-    let Some(buf) = app.new_project.as_ref() else { return };
+    let Some(buf) = app.new_project.as_ref() else {
+        return;
+    };
     let area = centered_rect(60, 30, frame.area());
     frame.render_widget(ratatui::widgets::Clear, area);
     let lines = vec![
@@ -2678,10 +2957,17 @@ fn render_new_project_modal(frame: &mut Frame, app: &App) {
         Line::from("in no project floats (available to all)."),
         Line::from(""),
         Line::from(vec![
-            Span::styled("Name: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Name: ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 buf.clone(),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("\u{2588}", Style::default().fg(Color::Cyan)),
         ]),
@@ -2694,14 +2980,20 @@ fn render_new_project_modal(frame: &mut Frame, app: &App) {
         ]),
     ];
     let para = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" New project "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" New project "),
+        )
         .style(Style::default().bg(Color::Reset));
     frame.render_widget(para, area);
 }
 
 /// "Rename project" prompt (key `r` on a project row).
 fn render_rename_project_modal(frame: &mut Frame, app: &App) {
-    let Some((_, buf)) = app.rename_project.as_ref() else { return };
+    let Some((_, buf)) = app.rename_project.as_ref() else {
+        return;
+    };
     let area = centered_rect(60, 25, frame.area());
     frame.render_widget(ratatui::widgets::Clear, area);
     let lines = vec![
@@ -2711,10 +3003,17 @@ fn render_rename_project_modal(frame: &mut Frame, app: &App) {
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("Name: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Name: ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 buf.clone(),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("\u{2588}", Style::default().fg(Color::Cyan)),
         ]),
@@ -2727,7 +3026,11 @@ fn render_rename_project_modal(frame: &mut Frame, app: &App) {
         ]),
     ];
     let para = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Rename project "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Rename project "),
+        )
         .style(Style::default().bg(Color::Reset));
     frame.render_widget(para, area);
 }
@@ -2735,7 +3038,9 @@ fn render_rename_project_modal(frame: &mut Frame, app: &App) {
 /// Cyan+bold when the field is focused, dim otherwise.
 fn field_label_style(focused: bool) -> Style {
     if focused {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(SECONDARY_FG)
     }
@@ -2745,7 +3050,9 @@ fn field_label_style(focused: bool) -> Style {
 fn cursor_block(s: &str) -> Span<'static> {
     Span::styled(
         s.to_string(),
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::REVERSED),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::REVERSED),
     )
 }
 
@@ -2839,9 +3146,7 @@ fn render_story_modal(frame: &mut Frame, app: &App, issue: u64) {
         .as_ref()
         .and_then(|m| m.title.clone())
         .unwrap_or_else(|| "(title not loaded)".to_string());
-    let pr_title = pr_meta
-        .as_ref()
-        .and_then(|m| m.title.clone());
+    let pr_title = pr_meta.as_ref().and_then(|m| m.title.clone());
 
     let issue_state = match issue_meta.as_ref().map(|m| m.closed) {
         Some(true) => "CLOSED",
@@ -2873,13 +3178,12 @@ fn render_story_modal(frame: &mut Frame, app: &App, issue: u64) {
     }
     lines.push(Line::from(""));
 
-    let pr_label = pr.map(|p| format!("PR #{p}")).unwrap_or_else(|| "no PR".into());
+    let pr_label = pr
+        .map(|p| format!("PR #{p}"))
+        .unwrap_or_else(|| "no PR".into());
     lines.push(Line::from(vec![
         Span::raw("Issue: "),
-        Span::styled(
-            issue_state,
-            Style::default().fg(state_color(issue_state)),
-        ),
+        Span::styled(issue_state, Style::default().fg(state_color(issue_state))),
         Span::raw("    "),
         Span::raw(format!("{pr_label}: ")),
         Span::styled(pr_state, Style::default().fg(state_color(pr_state))),
@@ -2902,10 +3206,7 @@ fn render_story_modal(frame: &mut Frame, app: &App, issue: u64) {
             .trim()
             .to_string();
         if let Some(p) = pr {
-            details = details
-                .replace(&format!("pr=#{p}"), "")
-                .trim()
-                .to_string();
+            details = details.replace(&format!("pr=#{p}"), "").trim().to_string();
         }
         lines.push(Line::from(vec![
             Span::styled(format!("  {ts}  "), Style::default().fg(SECONDARY_FG)),
@@ -2919,28 +3220,43 @@ fn render_story_modal(frame: &mut Frame, app: &App, issue: u64) {
     }
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("[c] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[c] ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("close   "),
-        Span::styled("[o] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[o] ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("open in browser   "),
-        Span::styled("[esc] ", Style::default().fg(SECONDARY_FG).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[esc] ",
+            Style::default()
+                .fg(SECONDARY_FG)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("back"),
     ]));
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(
-            title,
-            Style::default().add_modifier(Modifier::BOLD),
-        ));
-    let para = Paragraph::new(lines).block(block).style(Style::default().bg(Color::Reset));
+    let block = Block::default().borders(Borders::ALL).title(Span::styled(
+        title,
+        Style::default().add_modifier(Modifier::BOLD),
+    ));
+    let para = Paragraph::new(lines)
+        .block(block)
+        .style(Style::default().bg(Color::Reset));
     frame.render_widget(para, area);
 }
 
 /// Events tied to an issue (and its associated PR, if any). Used by
 /// the story modal to render the chronology. Filters in chronological
 /// order — `app.events` is push-order so that's already chronological.
-fn events_for_issue<'a>(app: &'a App, issue: u64, pr: Option<u64>) -> Vec<&'a Event> {
+fn events_for_issue(app: &App, issue: u64, pr: Option<u64>) -> Vec<&Event> {
     app.events
         .iter()
         .filter(|ev| {
@@ -3005,8 +3321,8 @@ fn pad_to(s: &str, width: usize) -> String {
 mod tests {
     use super::*;
     use crate::store::{Agent, AgentState, ClientKind, Message};
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use tokio::sync::mpsc;
 
     /// Flatten the rendered buffer into one string for substring asserts.
@@ -3033,7 +3349,12 @@ mod tests {
     fn app_with_one_agent() -> App {
         let (tx, _rx) = mpsc::channel(1);
         let (wtx, _wrx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(tx, std::path::PathBuf::from("/tmp/fleet-test"), Some("tester".to_string()), wtx);
+        let mut app = App::new(
+            tx,
+            std::path::PathBuf::from("/tmp/fleet-test"),
+            Some("tester".to_string()),
+            wtx,
+        );
         let now = chrono::Local::now().fixed_offset();
         app.roster = vec![Agent {
             name: "vscode-bot".into(),
@@ -3074,7 +3395,10 @@ mod tests {
         assert!(text.contains("VS Code UI"), "role chip");
         assert!(!text.contains("web"), "repo column is hidden");
         assert!(!text.contains("acme/14"), "board column is hidden");
-        assert!(!text.contains("[working]"), "state text label is gone — the dot conveys it");
+        assert!(
+            !text.contains("[working]"),
+            "state text label is gone — the dot conveys it"
+        );
     }
 
     #[test]
@@ -3103,7 +3427,10 @@ mod tests {
         terminal.draw(|f| render(f, &mut app)).unwrap();
         let text = screen(&terminal);
         // Loud alert only for the supervisor-block; calm count for the peer one.
-        assert!(text.contains("1 blocked — needs you"), "supervisor-block alert");
+        assert!(
+            text.contains("1 blocked — needs you"),
+            "supervisor-block alert"
+        );
         assert!(text.contains("1 waiting"), "peer-block calm count");
         // Distinct row glyphs: ⚠ (needs you) vs ◐ (waiting on peer).
         assert!(text.contains('⚠'), "blocked-on-supervisor shows ⚠");
@@ -3147,7 +3474,10 @@ mod tests {
     fn inbox_body_scrolls_when_long() {
         let mut app = app_with_one_agent();
         // A 40-line body that overflows the detail pane in a short terminal.
-        let body = (1..=40).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let body = (1..=40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         app.inboxes.insert(
             "vscode-bot".into(),
             vec![Message {
@@ -3167,8 +3497,14 @@ mod tests {
         t.draw(|f| render(f, &mut app)).unwrap();
         let top = screen(&t);
         assert!(top.contains("line 1"), "shows the start of the body");
-        assert!(top.contains('↓'), "a scrollbar appears when the body overflows");
-        assert!(!top.contains("line 40"), "the tail is off-screen before scrolling");
+        assert!(
+            top.contains('↓'),
+            "a scrollbar appears when the body overflows"
+        );
+        assert!(
+            !top.contains("line 40"),
+            "the tail is off-screen before scrolling"
+        );
 
         // Scroll past the end (the renderer clamps) — the tail becomes visible.
         app.inbox_scroll = 200;
@@ -3190,7 +3526,11 @@ mod tests {
             matches!(&c.targets[c.target_idx], crate::app::ComposeTarget::Client(n) if n == "mcp-bot"),
             "addressed to the sender"
         );
-        assert_eq!(c.field, crate::app::ComposeField::Body, "caret starts in the body");
+        assert_eq!(
+            c.field,
+            crate::app::ComposeField::Body,
+            "caret starts in the body"
+        );
     }
 
     #[test]
@@ -3215,14 +3555,20 @@ mod tests {
         t.draw(|f| render(f, &mut app)).unwrap();
         let text = screen(&t);
         assert!(text.contains("msg 1"), "shows the top of the list");
-        assert!(text.contains('↓'), "a scrollbar appears when the list overflows");
+        assert!(
+            text.contains('↓'),
+            "a scrollbar appears when the list overflows"
+        );
     }
 
     #[test]
     fn role_links_to_repo() {
         let mut app = app_with_one_agent(); // vscode-bot, repo acme/web
         // The link is gated on a confirmed-existing repo (cached gh check).
-        app.repo_exists.lock().unwrap().insert("acme/web".into(), true);
+        app.repo_exists
+            .lock()
+            .unwrap()
+            .insert("acme/web".into(), true);
         let mut t = Terminal::new(TestBackend::new(140, 30)).unwrap();
         t.draw(|f| render(f, &mut app)).unwrap();
         assert!(
@@ -3251,8 +3597,14 @@ mod tests {
             repo_url("acme/web").as_deref(),
             Some("https://github.com/acme/web")
         );
-        assert!(repo_url("acme/*").is_none(), "fleet-wide glob (code review)");
-        assert!(repo_url("local/token-optimization").is_none(), "non-GitHub owner");
+        assert!(
+            repo_url("acme/*").is_none(),
+            "fleet-wide glob (code review)"
+        );
+        assert!(
+            repo_url("local/token-optimization").is_none(),
+            "non-GitHub owner"
+        );
         assert!(repo_url("-").is_none(), "human placeholder");
         assert!(repo_url("").is_none());
     }
@@ -3273,7 +3625,10 @@ mod tests {
             state_indicator(AgentState::Blocked, false, 5).content,
             "blocked no longer animates"
         );
-        assert!(blocked.content.contains('⚠'), "blocked shows a warning sign");
+        assert!(
+            blocked.content.contains('⚠'),
+            "blocked shows a warning sign"
+        );
         // Idle is steady — same glyph regardless of tick.
         assert_eq!(
             state_indicator(AgentState::Idle, false, 0).content,
@@ -3294,7 +3649,12 @@ mod tests {
     fn empty_roster_shows_placeholder_not_panic() {
         let (tx, _rx) = mpsc::channel(1);
         let (wtx, _wrx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(tx, std::path::PathBuf::from("/tmp/fleet-test"), Some("tester".to_string()), wtx);
+        let mut app = App::new(
+            tx,
+            std::path::PathBuf::from("/tmp/fleet-test"),
+            Some("tester".to_string()),
+            wtx,
+        );
         let mut terminal = Terminal::new(TestBackend::new(140, 20)).unwrap();
         terminal.draw(|f| render(f, &mut app)).unwrap();
         assert!(screen(&terminal).contains("no clients yet"));
@@ -3341,7 +3701,10 @@ mod tests {
 
         // Selecting the client resolves to the client; selecting the item does not.
         app.tree_selected = 0;
-        assert_eq!(app.selected_agent().map(|a| a.name.as_str()), Some("vscode-bot"));
+        assert_eq!(
+            app.selected_agent().map(|a| a.name.as_str()),
+            Some("vscode-bot")
+        );
         app.tree_selected = item_idx;
         assert!(app.selected_agent().is_none(), "an item row isn't a client");
 
@@ -3381,7 +3744,11 @@ mod tests {
         app.open_compose();
 
         let c = app.compose.as_ref().expect("compose modal opened");
-        assert_eq!(c.targets[c.target_idx].label(), "vscode-bot", "addressed to the PR's owner");
+        assert_eq!(
+            c.targets[c.target_idx].label(),
+            "vscode-bot",
+            "addressed to the PR's owner"
+        );
         assert_eq!(c.title, "PR #98", "title pre-filled with the PR ref");
         assert_eq!(c.field, ComposeField::Body, "caret starts in the body");
     }
@@ -3404,8 +3771,12 @@ mod tests {
         t.draw(|f| render(f, &mut app)).unwrap();
         let buf = t.backend().buffer();
         let w = buf.area.width as usize;
-        let row_text =
-            |y: usize| -> String { buf.content[y * w..(y + 1) * w].iter().map(|c| c.symbol()).collect() };
+        let row_text = |y: usize| -> String {
+            buf.content[y * w..(y + 1) * w]
+                .iter()
+                .map(|c| c.symbol())
+                .collect()
+        };
         let label_row = (0..buf.area.height as usize)
             .find(|&y| row_text(y).contains("Message:"))
             .expect("Message: label present");
@@ -3444,41 +3815,63 @@ mod tests {
         let w = buf.area.width as usize;
         let x_rows = (0..buf.area.height as usize)
             .filter(|&y| {
-                let line: String =
-                    buf.content[y * w..(y + 1) * w].iter().map(|c| c.symbol()).collect();
+                let line: String = buf.content[y * w..(y + 1) * w]
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect();
                 line.matches('x').count() > 3
             })
             .count();
-        assert!(x_rows >= 2, "a long body wraps onto multiple rows (got {x_rows})");
+        assert!(
+            x_rows >= 2,
+            "a long body wraps onto multiple rows (got {x_rows})"
+        );
     }
 
     #[test]
     fn help_documents_the_group_leader_shortcut() {
         let (tx, _rx) = mpsc::channel(1);
         let (wtx, _wrx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app =
-            App::new(tx, std::path::PathBuf::from("/tmp/fleet-test"), Some("tester".to_string()), wtx);
+        let mut app = App::new(
+            tx,
+            std::path::PathBuf::from("/tmp/fleet-test"),
+            Some("tester".to_string()),
+            wtx,
+        );
         app.show_help = true;
         // Tall enough that the (long) help isn't vertically clipped.
         let mut t = Terminal::new(TestBackend::new(160, 90)).unwrap();
         t.draw(|f| render(f, &mut app)).unwrap();
         let text = screen(&t);
-        assert!(text.contains("group leader"), "help explains promoting a client to group leader");
-        assert!(text.contains("coordinator"), "help names the coordinator role");
+        assert!(
+            text.contains("group leader"),
+            "help explains promoting a client to group leader"
+        );
+        assert!(
+            text.contains("coordinator"),
+            "help names the coordinator role"
+        );
     }
 
     #[test]
     fn help_scrolls_with_a_scrollbar_when_overflowing() {
         let (tx, _rx) = mpsc::channel(1);
         let (wtx, _wrx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app =
-            App::new(tx, std::path::PathBuf::from("/tmp/fleet-test"), Some("tester".to_string()), wtx);
+        let mut app = App::new(
+            tx,
+            std::path::PathBuf::from("/tmp/fleet-test"),
+            Some("tester".to_string()),
+            wtx,
+        );
         app.show_help = true;
         // Short + narrow terminal → the help wraps and overflows, so a
         // scrollbar must appear and rendering must not panic.
         let mut t = Terminal::new(TestBackend::new(90, 20)).unwrap();
         t.draw(|f| render(f, &mut app)).unwrap();
-        assert!(screen(&t).contains('↓'), "a scrollbar end-arrow shows when help overflows");
+        assert!(
+            screen(&t).contains('↓'),
+            "a scrollbar end-arrow shows when help overflows"
+        );
     }
 
     #[test]
@@ -3490,8 +3883,10 @@ mod tests {
             let buf = t.backend().buffer();
             let w = buf.area.width as usize;
             for y in 0..buf.area.height as usize {
-                let row: String =
-                    buf.content[y * w..(y + 1) * w].iter().map(|c| c.symbol()).collect();
+                let row: String = buf.content[y * w..(y + 1) * w]
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect();
                 if let Some(b) = row.find("vscode-bot") {
                     let col = row[..b].chars().count();
                     return buf.content[y * w + col].modifier.contains(Modifier::BOLD);
@@ -3501,9 +3896,15 @@ mod tests {
         };
         let mut app = app_with_one_agent();
         app.roster[0].state = AgentState::Working;
-        assert!(name_is_bold(&mut app), "a working client's name is bold/bright");
+        assert!(
+            name_is_bold(&mut app),
+            "a working client's name is bold/bright"
+        );
         app.roster[0].state = AgentState::Idle;
-        assert!(!name_is_bold(&mut app), "an idle client's name is dimmed (not bold)");
+        assert!(
+            !name_is_bold(&mut app),
+            "an idle client's name is dimmed (not bold)"
+        );
     }
 
     #[test]
@@ -3517,7 +3918,7 @@ mod tests {
             five_hour_pct: 90.0,
             seven_day_pct: 88.0,
             ts: now,
-            five_hour_reset: Some(now + 70 * 60),               // 1h10m out
+            five_hour_reset: Some(now + 70 * 60), // 1h10m out
             seven_day_reset: Some(now + 6 * 86400 + 14 * 3600), // 6d14h out
         });
         let mut t = Terminal::new(TestBackend::new(160, 30)).unwrap();
@@ -3526,8 +3927,14 @@ mod tests {
         assert!(text.contains("session 90%"), "shows the 5h session usage");
         assert!(text.contains("weekly 88%"), "shows the 7d weekly usage");
         // Reset countdowns appear after each percentage.
-        assert!(text.contains("1h10m"), "shows time until the 5h window resets");
-        assert!(text.contains("6d14h"), "shows time until the 7d window resets");
+        assert!(
+            text.contains("1h10m"),
+            "shows time until the 5h window resets"
+        );
+        assert!(
+            text.contains("6d14h"),
+            "shows time until the 7d window resets"
+        );
         // A fresh reading is not labelled stale.
         assert!(!text.contains("old"), "fresh usage carries no age label");
     }
@@ -3551,8 +3958,14 @@ mod tests {
         let mut t = Terminal::new(TestBackend::new(160, 30)).unwrap();
         t.draw(|f| render(f, &mut app)).unwrap();
         let text = screen(&t);
-        assert!(text.contains("session 90%"), "stale reading still shows numbers");
-        assert!(text.contains("10m old"), "stale reading is tagged with its age");
+        assert!(
+            text.contains("session 90%"),
+            "stale reading still shows numbers"
+        );
+        assert!(
+            text.contains("10m old"),
+            "stale reading is tagged with its age"
+        );
     }
 
     #[test]
@@ -3570,15 +3983,23 @@ mod tests {
         terminal.draw(|f| render(f, &mut app)).unwrap();
         assert!(screen(&terminal).contains("#191"), "merged ticket shows");
         assert!(
-            app.tree_rows.iter().any(
-                |r| matches!(r, TreeRow::Item { issue: Some(191), finished: true, .. })
-            ),
+            app.tree_rows.iter().any(|r| matches!(
+                r,
+                TreeRow::Item {
+                    issue: Some(191),
+                    finished: true,
+                    ..
+                }
+            )),
             "row is marked finished (x would dismiss it)"
         );
         // `x` → acknowledged → drops out of the view.
         app.acknowledged.insert(191);
         terminal.draw(|f| render(f, &mut app)).unwrap();
-        assert!(!screen(&terminal).contains("#191"), "dismissed ticket is hidden");
+        assert!(
+            !screen(&terminal).contains("#191"),
+            "dismissed ticket is hidden"
+        );
     }
 
     #[test]
@@ -3659,9 +4080,14 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
         terminal.draw(|f| render(f, &mut app)).unwrap();
         // The PR number shows in its own column, and it's clickable.
-        assert!(screen(&terminal).contains("PR #60"), "PR column shows the number");
         assert!(
-            app.click_targets.iter().any(|t| t.url.ends_with("/pull/60")),
+            screen(&terminal).contains("PR #60"),
+            "PR column shows the number"
+        );
+        assert!(
+            app.click_targets
+                .iter()
+                .any(|t| t.url.ends_with("/pull/60")),
             "PR column links to the PR"
         );
     }
@@ -3811,10 +4237,19 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
         terminal.draw(|f| render(f, &mut app)).unwrap();
         let text = screen(&terminal);
-        assert!(text.contains("Send to vscode-bot?"), "confirm prompt names the recipient");
-        assert!(text.contains("keep editing"), "confirm prompt offers a way back");
+        assert!(
+            text.contains("Send to vscode-bot?"),
+            "confirm prompt names the recipient"
+        );
+        assert!(
+            text.contains("keep editing"),
+            "confirm prompt offers a way back"
+        );
         // The composed content is still visible to review before confirming.
-        assert!(text.contains("no action needed"), "body still shown under the prompt");
+        assert!(
+            text.contains("no action needed"),
+            "body still shown under the prompt"
+        );
     }
 
     #[test]
@@ -3847,7 +4282,10 @@ mod tests {
         terminal.draw(|f| render(f, &mut app)).unwrap();
         let text = screen(&terminal);
         assert!(text.contains("Auth Revamp"), "project header rendered");
-        assert!(text.contains("vscode-bot ★"), "coordinator marked with a trailing star on its row");
+        assert!(
+            text.contains("vscode-bot ★"),
+            "coordinator marked with a trailing star on its row"
+        );
         assert!(text.contains("protoman"), "outside client still listed");
         assert!(text.contains("42%"), "per-agent context % rendered");
         // Outside / floating clients render on top, above the project sections.
@@ -3902,9 +4340,15 @@ mod tests {
         terminal.draw(|f| render(f, &mut app)).unwrap();
         let text = screen(&terminal);
         // The list row clips; only the wrapped detail pane shows the tail word.
-        assert!(text.contains("followup"), "detail pane shows the full task text, wrapped");
+        assert!(
+            text.contains("followup"),
+            "detail pane shows the full task text, wrapped"
+        );
         // The body (the "message") renders in the detail too.
-        assert!(text.contains("detail pane"), "task body renders in the detail");
+        assert!(
+            text.contains("detail pane"),
+            "task body renders in the detail"
+        );
     }
 
     #[test]
@@ -3985,7 +4429,10 @@ mod tests {
             TreeRow::Client(i) => app.roster[*i].name.clone(),
             _ => unreachable!("last row is a client"),
         };
-        assert!(screen(&terminal).contains(&first), "top agent visible when selected at top");
+        assert!(
+            screen(&terminal).contains(&first),
+            "top agent visible when selected at top"
+        );
 
         // Select the last agent: the pane scrolls to it; the top scrolls off.
         app.tree_selected = last_idx;
@@ -4048,8 +4495,12 @@ mod tests {
             from_msg: None,
         };
         let mut app = app_with_one_agent();
-        app.roster = vec![mk("tester", ClientKind::Human), mk("bot", ClientKind::Agent)];
-        app.tasks.insert("tester".into(), vec![task("my own reminder")]);
+        app.roster = vec![
+            mk("tester", ClientKind::Human),
+            mk("bot", ClientKind::Agent),
+        ];
+        app.tasks
+            .insert("tester".into(), vec![task("my own reminder")]);
         app.tasks.insert("bot".into(), vec![task("agent reminder")]);
         app.focus_mode = FocusMode::Clients;
 
@@ -4059,12 +4510,18 @@ mod tests {
         terminal.draw(|f| render(f, &mut app)).unwrap();
         let scr = screen(&terminal);
         assert!(scr.contains("my own reminder"), "my own tasks always show");
-        assert!(!scr.contains("agent reminder"), "agent tasks hidden when toggled off");
+        assert!(
+            !scr.contains("agent reminder"),
+            "agent tasks hidden when toggled off"
+        );
 
         // Tab on: the agent's task returns.
         app.show_client_tasks = true;
         terminal.draw(|f| render(f, &mut app)).unwrap();
-        assert!(screen(&terminal).contains("agent reminder"), "agent tasks return when toggled on");
+        assert!(
+            screen(&terminal).contains("agent reminder"),
+            "agent tasks return when toggled on"
+        );
     }
 
     #[test]

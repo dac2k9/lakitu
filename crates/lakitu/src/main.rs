@@ -1,5 +1,13 @@
 //! lakitu — live TUI for the Claude Code agent activity log.
 
+// Nested `if`s and the markdown-list doc comments are deliberate for
+// readability; we keep them rather than collapse/reflow on clippy's say-so.
+#![allow(
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::doc_lazy_continuation
+)]
+
 mod app;
 mod client;
 mod event;
@@ -94,7 +102,10 @@ async fn main() -> Result<()> {
     let store_root = cli
         .store
         .or_else(|| {
-            std::env::var("GENBOT_STORE").ok().filter(|s| !s.is_empty()).map(PathBuf::from)
+            std::env::var("GENBOT_STORE")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
         })
         .unwrap_or_else(store::default_store_root);
 
@@ -138,9 +149,10 @@ async fn main() -> Result<()> {
     if cli.dump_store {
         let (snap, label) = match &source {
             store::Source::Local(r) => (store::read_snapshot(r).await, r.display().to_string()),
-            store::Source::Remote(rc) => {
-                (rc.snapshot().await.unwrap_or_default(), cli.server.clone().unwrap_or_default())
-            }
+            store::Source::Remote(rc) => (
+                rc.snapshot().await.unwrap_or_default(),
+                cli.server.clone().unwrap_or_default(),
+            ),
         };
         dump_store(&snap, &label);
         return Ok(());
@@ -169,7 +181,12 @@ fn image_test(path: &std::path::Path) -> Result<()> {
     img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
 
-    println!("source {}×{}px, {} bytes png → kitty graphics:", w, h, png.len());
+    println!(
+        "source {}×{}px, {} bytes png → kitty graphics:",
+        w,
+        h,
+        png.len()
+    );
     let bytes = b64.as_bytes();
     let chunk = 4096;
     let mut i = 0;
@@ -193,7 +210,10 @@ fn image_test(path: &std::path::Path) -> Result<()> {
 
 fn default_log_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".claude").join("logs").join("agent-actions.log")
+    PathBuf::from(home)
+        .join(".claude")
+        .join("logs")
+        .join("agent-actions.log")
 }
 
 /// One-shot text dump of the fleet store. Mirrors what the agents pane +

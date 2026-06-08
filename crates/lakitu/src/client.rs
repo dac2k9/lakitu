@@ -19,7 +19,9 @@ use serde_json::json;
 static MSG_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn now_iso() -> String {
-    chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string()
+    chrono::Local::now()
+        .format("%Y-%m-%dT%H:%M:%S%:z")
+        .to_string()
 }
 
 /// Path-safe single component (mirrors the MCP's `sanitize`).
@@ -87,11 +89,20 @@ pub fn remember_me(root: &Path, name: &str) -> io::Result<()> {
 fn next_id() -> String {
     let nanos = chrono::Local::now().timestamp_nanos_opt().unwrap_or(0) as u64;
     let c = MSG_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{:06x}", ((nanos >> 8) ^ c.wrapping_mul(2_654_435_761)) & 0xff_ffff)
+    format!(
+        "{:06x}",
+        ((nanos >> 8) ^ c.wrapping_mul(2_654_435_761)) & 0xff_ffff
+    )
 }
 
 /// Write one message into `to`'s inbox. Returns the new message id.
-pub fn send_message(root: &Path, from: &str, to: &str, title: &str, body: &str) -> io::Result<String> {
+pub fn send_message(
+    root: &Path,
+    from: &str,
+    to: &str,
+    title: &str,
+    body: &str,
+) -> io::Result<String> {
     let to = sanitize(to);
     let dir = root.join("inbox").join(&to);
     std::fs::create_dir_all(&dir)?;
@@ -113,13 +124,7 @@ pub fn send_message(root: &Path, from: &str, to: &str, title: &str, body: &str) 
 
 /// Fan a message out to every recipient's inbox (broadcast / "everyone").
 /// Returns how many were delivered.
-pub fn broadcast(
-    root: &Path,
-    from: &str,
-    recipients: &[String],
-    title: &str,
-    body: &str,
-) -> usize {
+pub fn broadcast(root: &Path, from: &str, recipients: &[String], title: &str, body: &str) -> usize {
     recipients
         .iter()
         .filter(|r| send_message(root, from, r, title, body).is_ok())
@@ -168,7 +173,10 @@ pub fn delete_message(root: &Path, owner: &str, msg_id: &str) -> io::Result<()> 
             if !p.is_file() {
                 continue;
             }
-            if p.file_name().and_then(|s| s.to_str()).map(|f| f.ends_with(&suffix)).unwrap_or(false)
+            if p.file_name()
+                .and_then(|s| s.to_str())
+                .map(|f| f.ends_with(&suffix))
+                .unwrap_or(false)
             {
                 let _ = std::fs::remove_file(&p);
             }
@@ -220,7 +228,10 @@ pub fn add_task(
     let mut tasks = read_tasks_value(root, owner);
     let nanos = chrono::Local::now().timestamp_nanos_opt().unwrap_or(0) as u64;
     let c = TASK_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let id = format!("{:06x}", ((nanos >> 8) ^ c.wrapping_mul(2_654_435_761)) & 0xff_ffff);
+    let id = format!(
+        "{:06x}",
+        ((nanos >> 8) ^ c.wrapping_mul(2_654_435_761)) & 0xff_ffff
+    );
     let mut obj = json!({
         "id": id,
         "text": text.trim(),
@@ -292,7 +303,10 @@ fn write_projects(root: &Path, projects: &[Project]) -> io::Result<()> {
     std::fs::create_dir_all(root)?;
     let path = projects_path(root);
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&json!({ "projects": projects }))?)?;
+    std::fs::write(
+        &tmp,
+        serde_json::to_vec_pretty(&json!({ "projects": projects }))?,
+    )?;
     std::fs::rename(&tmp, &path)?;
     Ok(())
 }
@@ -388,11 +402,7 @@ pub fn set_membership(
 
 /// Toggle `client` as `project_id`'s coordinator. Setting it also ensures
 /// membership; if already the coordinator, clears it.
-pub fn toggle_coordinator(
-    root: &Path,
-    project_id: &str,
-    client: &str,
-) -> io::Result<Vec<Project>> {
+pub fn toggle_coordinator(root: &Path, project_id: &str, client: &str) -> io::Result<Vec<Project>> {
     let mut projects = read_projects(root);
     if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
         if p.coordinator.as_deref() == Some(client) {
@@ -461,7 +471,11 @@ mod tests {
         let root = scratch("disconnect");
         let agents = root.join("agents");
         fs::create_dir_all(&agents).unwrap();
-        fs::write(agents.join("aria.json"), r#"{"name":"aria","kind":"agent"}"#).unwrap();
+        fs::write(
+            agents.join("aria.json"),
+            r#"{"name":"aria","kind":"agent"}"#,
+        )
+        .unwrap();
         fs::write(agents.join("aria.heartbeat.json"), r#"{"state":"idle"}"#).unwrap();
         fs::write(agents.join("aria.context.json"), r#"{"pct":10}"#).unwrap();
         fs::create_dir_all(root.join("inbox/aria")).unwrap();
@@ -474,10 +488,19 @@ mod tests {
         let projects = disconnect_client(&root, "aria").unwrap();
 
         assert!(!agents.join("aria.json").exists(), "registry removed");
-        assert!(!agents.join("aria.heartbeat.json").exists(), "heartbeat removed");
-        assert!(!agents.join("aria.context.json").exists(), "context sidecar removed");
+        assert!(
+            !agents.join("aria.heartbeat.json").exists(),
+            "heartbeat removed"
+        );
+        assert!(
+            !agents.join("aria.context.json").exists(),
+            "context sidecar removed"
+        );
         assert!(!root.join("inbox/aria").exists(), "inbox removed");
-        assert!(projects[0].members.iter().all(|m| m != "aria"), "dropped from members");
+        assert!(
+            projects[0].members.iter().all(|m| m != "aria"),
+            "dropped from members"
+        );
         assert!(projects[0].coordinator.is_none(), "cleared as coordinator");
     }
 
@@ -499,10 +522,18 @@ mod tests {
 
         // Delete works against the top-level (unread) message...
         delete_message(&root, "aria", &id1).unwrap();
-        assert_eq!(json_files(&root.join("inbox/aria")), 0, "unread message removed");
+        assert_eq!(
+            json_files(&root.join("inbox/aria")),
+            0,
+            "unread message removed"
+        );
         // ...and against the archived one.
         delete_message(&root, "aria", &id2).unwrap();
-        assert_eq!(json_files(&root.join("inbox/aria/read")), 0, "archived message removed");
+        assert_eq!(
+            json_files(&root.join("inbox/aria/read")),
+            0,
+            "archived message removed"
+        );
 
         // Deleting a missing id is a no-op (no error).
         delete_message(&root, "aria", "nope").unwrap();
@@ -528,7 +559,8 @@ mod tests {
         .unwrap();
 
         let read = |root: &Path| -> Vec<serde_json::Value> {
-            serde_json::from_str(&fs::read_to_string(root.join("tasks/aria.json")).unwrap()).unwrap()
+            serde_json::from_str(&fs::read_to_string(root.join("tasks/aria.json")).unwrap())
+                .unwrap()
         };
         let v = read(&root);
         assert_eq!(v.len(), 2);
@@ -585,15 +617,29 @@ mod tests {
         assert_eq!(json_files(&root.join("inbox/vscode-bot")), 1);
 
         // broadcast fans out to every recipient.
-        let n = broadcast(&root, "you", &["a".to_string(), "b".to_string()], "all", "hello");
+        let n = broadcast(
+            &root,
+            "you",
+            &["a".to_string(), "b".to_string()],
+            "all",
+            "hello",
+        );
         assert_eq!(n, 2);
         assert_eq!(json_files(&root.join("inbox/a")), 1);
         assert_eq!(json_files(&root.join("inbox/b")), 1);
 
         // mark_read archives the message into read/.
         mark_read(&root, "vscode-bot", &id).unwrap();
-        assert_eq!(json_files(&root.join("inbox/vscode-bot")), 0, "moved out of top level");
-        assert_eq!(json_files(&root.join("inbox/vscode-bot/read")), 1, "into read archive");
+        assert_eq!(
+            json_files(&root.join("inbox/vscode-bot")),
+            0,
+            "moved out of top level"
+        );
+        assert_eq!(
+            json_files(&root.join("inbox/vscode-bot/read")),
+            1,
+            "into read archive"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -612,10 +658,20 @@ mod tests {
 
         // Move a client in, then make it coordinator.
         let ps = set_membership(&root, "samus", Some(&auth)).unwrap();
-        assert!(ps.iter().find(|p| p.id == auth).unwrap().members.contains(&"samus".into()));
+        assert!(
+            ps.iter()
+                .find(|p| p.id == auth)
+                .unwrap()
+                .members
+                .contains(&"samus".into())
+        );
         let ps = toggle_coordinator(&root, &auth, "samus").unwrap();
         assert_eq!(
-            ps.iter().find(|p| p.id == auth).unwrap().coordinator.as_deref(),
+            ps.iter()
+                .find(|p| p.id == auth)
+                .unwrap()
+                .coordinator
+                .as_deref(),
             Some("samus")
         );
 
@@ -625,12 +681,21 @@ mod tests {
         let left = ps.iter().find(|p| p.id == auth).unwrap();
         assert!(left.members.is_empty(), "left the old project");
         assert!(left.coordinator.is_none(), "coordinator cleared on leave");
-        assert!(ps.iter().find(|p| p.id == billing).unwrap().members.contains(&"samus".into()));
+        assert!(
+            ps.iter()
+                .find(|p| p.id == billing)
+                .unwrap()
+                .members
+                .contains(&"samus".into())
+        );
 
         // Removing a project just drops it — members float (no longer listed).
         let ps = remove_project(&root, &billing).unwrap();
         assert!(!ps.iter().any(|p| p.id == billing));
-        assert!(!ps.iter().any(|p| p.members.contains(&"samus".into())), "samus floats");
+        assert!(
+            !ps.iter().any(|p| p.members.contains(&"samus".into())),
+            "samus floats"
+        );
 
         // Persisted to disk.
         let reread = read_projects(&root);
