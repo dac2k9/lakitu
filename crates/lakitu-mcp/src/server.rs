@@ -623,6 +623,7 @@ impl AgentBoardService {
         let multi = repos.len() > 1;
         let mut out = String::new();
         let mut emitted = 0usize;
+        let mut reconciled = 0usize;
         for repo_slug in &repos {
             if multi {
                 out.push_str(&format!("== {repo_slug} ==\n"));
@@ -648,7 +649,7 @@ impl AgentBoardService {
                 // `ready-flipped` so it lands in the right state. The full
                 // slug in the repo column lets the cockpit attribute it to
                 // the owning client.
-                if !logged.contains(&(repo_slug.clone(), *number)) {
+                if !logged.all.contains(&(repo_slug.clone(), *number)) {
                     let _ = append_audit_log(
                         "board-sweep",
                         "pr-opened",
@@ -668,11 +669,63 @@ impl AgentBoardService {
                     emitted += 1;
                 }
             }
+
+            // Reconcile stale cards: any *active* card for this repo that's no
+            // longer in the live open set was merged or closed outside an agent
+            // loop (e.g. a merge done through the GitHub UI). Re-query each and
+            // emit a terminal event so the cockpit clears it. Scoped to the
+            // swept repo, so an un-swept repo's cards are never touched. The
+            // stale set is normally tiny, and a card drops out of it for good
+            // once its terminal event lands — so the gh calls don't pile up.
+            let open_now: std::collections::HashSet<u64> = rows.iter().map(|r| r.0).collect();
+            let mut stale: Vec<u64> = logged
+                .active
+                .iter()
+                .filter(|(r, _)| r == repo_slug)
+                .map(|(_, n)| *n)
+                .filter(|n| !open_now.contains(n))
+                .collect();
+            stale.sort_unstable();
+            for n in stale {
+                match pr_state(n, repo_slug).await {
+                    Ok(PrState::Merged) => {
+                        let _ = append_audit_log(
+                            "board-sweep",
+                            "pr-merged",
+                            repo_slug,
+                            &format!("pr=#{n}"),
+                        )
+                        .await;
+                        out.push_str(&format!("  reconciled #{n}: merged → card cleared\n"));
+                        reconciled += 1;
+                    }
+                    Ok(PrState::Closed) => {
+                        let _ = append_audit_log(
+                            "board-sweep",
+                            "card-done",
+                            repo_slug,
+                            &format!("pr=#{n}"),
+                        )
+                        .await;
+                        out.push_str(&format!("  reconciled #{n}: closed → card retired\n"));
+                        reconciled += 1;
+                    }
+                    // Still open (e.g. no longer agent-authored) or the query
+                    // failed — leave the card as-is.
+                    Ok(PrState::Open) | Err(_) => {}
+                }
+            }
         }
         if emitted > 0 {
             out.push_str(&format!(
                 "\n({emitted} new PR{} surfaced to the cockpit)\n",
                 if emitted == 1 { "" } else { "s" }
+            ));
+        }
+        if reconciled > 0 {
+            out.push_str(&format!(
+                "({reconciled} stale card{} reconciled out)\n",
+                if reconciled == 1 { "" } else { "s" }
             ));
         }
         Ok(text(out))
@@ -2093,15 +2146,24 @@ async fn sweep_one_repo(repo_slug: &str) -> Result<Vec<SweepRow>, McpError> {
     Ok(rows)
 }
 
-/// PRs already present in the event log, keyed by `(repo slug, number)` —
-/// lets sweep back-fill stay idempotent across repeated runs. Best-effort:
-/// a missing/unreadable log yields an empty set (every PR looks new). Repo
-/// columns are normalized to full slugs so short-name rows (`api`)
-/// and full-slug rows (`acme/api`) compare equal.
-async fn read_logged_prs() -> std::collections::HashSet<(String, u64)> {
-    let mut set = std::collections::HashSet::new();
+/// PRs seen in the event log, keyed by `(repo slug, number)`. `all` is every PR
+/// ever logged (so sweep back-fill stays idempotent); `active` is the still-open
+/// cards — those with a `pr-opened` but no terminal (`pr-merged`/`card-done`)
+/// event yet — which reconciliation re-checks against the live open set.
+/// Best-effort: a missing/unreadable log yields empty sets. Repo columns are
+/// normalized to full slugs so short-name rows (`api`) and full-slug rows
+/// (`acme/api`) compare equal.
+#[derive(Default)]
+struct LoggedPrs {
+    all: std::collections::HashSet<(String, u64)>,
+    active: std::collections::HashSet<(String, u64)>,
+}
+
+async fn read_logged_prs() -> LoggedPrs {
+    let mut all = std::collections::HashSet::new();
+    let mut terminated = std::collections::HashSet::new();
     let Ok(content) = tokio::fs::read_to_string(audit_log_path()).await else {
-        return set;
+        return LoggedPrs::default();
     };
     for line in content.lines() {
         let cols: Vec<&str> = line.split('\t').collect();
@@ -2109,10 +2171,45 @@ async fn read_logged_prs() -> std::collections::HashSet<(String, u64)> {
             continue;
         }
         if let Some(n) = parse_pr_ref(cols[4]) {
-            set.insert((normalize_repo_slug(Some(cols[2])), n));
+            let key = (normalize_repo_slug(Some(cols[2])), n);
+            // cols[3] is the action column.
+            if matches!(cols[3], "pr-merged" | "card-done") {
+                terminated.insert(key.clone());
+            }
+            all.insert(key);
         }
     }
-    set
+    let active = all.difference(&terminated).cloned().collect();
+    LoggedPrs { all, active }
+}
+
+/// High-level PR state, for reconciling a stale card against GitHub.
+enum PrState {
+    Open,
+    Closed,
+    Merged,
+}
+
+/// Re-query a single PR's state — used when a logged card is no longer in the
+/// live open set, to decide whether it merged, closed, or is just no longer
+/// agent-authored (still open).
+async fn pr_state(number: u64, repo_slug: &str) -> Result<PrState, McpError> {
+    let json = run_gh(&[
+        "pr",
+        "view",
+        &number.to_string(),
+        "--repo",
+        repo_slug,
+        "--json",
+        "state",
+    ])
+    .await?;
+    let v: serde_json::Value = serde_json::from_str(&json).map_err(mcp)?;
+    Ok(match v["state"].as_str().unwrap_or("") {
+        "MERGED" => PrState::Merged,
+        "CLOSED" => PrState::Closed,
+        _ => PrState::Open,
+    })
 }
 
 /// Extract the PR number from a `pr=#<n>` token in an event's details field.

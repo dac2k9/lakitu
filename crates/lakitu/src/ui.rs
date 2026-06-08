@@ -708,7 +708,7 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
                     is_leader,
                     row_y,
                     inner.x,
-                    app.hover_pos,
+                    None,
                     linkable,
                     open_tasks,
                 );
@@ -888,7 +888,7 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
                     item_w,
                     item_x,
                     iy,
-                    app,
+                    None,
                 );
                 let mut style = Style::default();
                 if matches!(
@@ -1060,23 +1060,38 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
-    // Scroll affordance on the right border: ↑ when there's content above, ↓
-    // when there's more below.
-    let bx = inner.x + inner.width; // right border column
-    if scroll > 0 {
-        if let Some(c) = frame.buffer_mut().cell_mut((bx, inner.y)) {
-            c.set_symbol("↑")
-                .set_style(Style::default().fg(Color::Cyan));
+    // Hover highlight: light up (REVERSED) the click target under the cursor,
+    // using the SAME screen-space `click_targets` as clicks — so the highlight
+    // can never drift from the actual hotspot. This pane renders into an
+    // off-screen buffer at content coordinates, so per-row hover can't be
+    // resolved during the build (the screen row isn't known until the blit);
+    // doing it here, post-blit, keeps hover and click in lock-step.
+    if let Some((hr, hc)) = app.hover_pos {
+        let fb = frame.buffer_mut();
+        for t in &app.click_targets {
+            if t.row == hr && hc >= t.col_start && hc < t.col_end {
+                for cx in t.col_start..t.col_end {
+                    if let Some(cell) = fb.cell_mut((cx, t.row)) {
+                        cell.set_style(Style::default().add_modifier(Modifier::REVERSED));
+                    }
+                }
+            }
         }
     }
-    if scroll + avail < content_h {
-        if let Some(c) = frame
-            .buffer_mut()
-            .cell_mut((bx, inner.y + avail.saturating_sub(1)))
-        {
-            c.set_symbol("↓")
-                .set_style(Style::default().fg(Color::Cyan));
-        }
+
+    // Scrollbar on the right border when the tree overflows the pane — a
+    // proportional thumb with ↑/↓ end arrows, matching the help/inbox panes.
+    // The position tracks the blit offset; `max_scroll + 1` is the number of
+    // distinct scroll positions (see `scroll` above).
+    if max_scroll > 0 {
+        let mut sb = ScrollbarState::new(max_scroll as usize + 1).position(scroll as usize);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓")),
+            area,
+            &mut sb,
+        );
     }
 }
 
@@ -1423,8 +1438,8 @@ fn normal_ref_style() -> Style {
 }
 
 /// Is the cell at `row, col_start..col_end` currently hovered?
-fn is_hovered(app: &App, row: u16, col_start: u16, col_end: u16) -> bool {
-    app.hover_pos
+fn is_hovered(hover: Option<(u16, u16)>, row: u16, col_start: u16, col_end: u16) -> bool {
+    hover
         .map(|(r, c)| r == row && c >= col_start && c < col_end)
         .unwrap_or(false)
 }
@@ -1571,7 +1586,7 @@ fn render_work_items(frame: &mut Frame, area: Rect, app: &mut App) {
             max_width,
             inner.x,
             row_y,
-            app,
+            app.hover_pos,
         );
 
         let mut row_style = Style::default();
@@ -1624,7 +1639,7 @@ fn build_work_item_line<'a>(
     max_width: u16,
     pane_x: u16,
     row_y: u16,
-    app: &App,
+    hover_pos: Option<(u16, u16)>,
 ) -> (Line<'a>, Vec<(u16, u16, String)>) {
     let mut spans = Vec::new();
     let mut targets: Vec<(u16, u16, String)> = Vec::new();
@@ -1660,7 +1675,7 @@ fn build_work_item_line<'a>(
         let text = format!("#{issue}");
         let len = text.chars().count() as u16;
         let start = col;
-        let hover = is_hovered(app, row_y, pane_x + start, pane_x + start + len);
+        let hover = is_hovered(hover_pos, row_y, pane_x + start, pane_x + start + len);
         spans.push(Span::styled(
             text,
             if hover {
@@ -1687,7 +1702,7 @@ fn build_work_item_line<'a>(
         let text = format!("PR #{pr}");
         let len = text.chars().count() as u16;
         let start = col;
-        let hover = is_hovered(app, row_y, pane_x + start, pane_x + start + len);
+        let hover = is_hovered(hover_pos, row_y, pane_x + start, pane_x + start + len);
         spans.push(Span::styled(
             text,
             if hover {
@@ -1897,7 +1912,7 @@ fn build_event_line<'a>(
         let token = &details[r.start..r.start + r.len];
         let col_start_abs = pane_x + EVENT_PREFIX_WIDTH + r.start as u16;
         let col_end_abs = col_start_abs + r.len as u16;
-        let hovered = is_hovered(app, row_y, col_start_abs, col_end_abs);
+        let hovered = is_hovered(app.hover_pos, row_y, col_start_abs, col_end_abs);
         spans.push(Span::styled(
             token,
             if hovered {
@@ -2012,6 +2027,7 @@ fn render_help_overlay(frame: &mut Frame, app: &mut App) {
         Line::from("  Tab           hide / show agent tasks in the pane (your own always show)"),
         Line::from("  o             open the selected event's first #N reference in browser"),
         Line::from("  Click on #N   open in browser (mouse)"),
+        Line::from("  Scroll wheel  scroll the focused pane / open modal (mouse)"),
         Line::from("  a             focus the Clients pane"),
         Line::from("  c             compose a message (to a client, or everyone)"),
         Line::from("  w             toggle the inbox-waker (wake stopped agents on new mail)"),
@@ -4093,9 +4109,57 @@ mod tests {
     }
 
     #[test]
+    fn clients_pane_hover_highlights_the_link_under_the_cursor() {
+        // Regression: the pane renders into an off-screen buffer at *content*
+        // coordinates, so a link's hover highlight must be resolved against the
+        // screen-space click target (post-blit) — not the content row, which
+        // lit the link up several rows above where it's actually drawn.
+        let mut app = app_with_one_agent();
+        app.work.ingest(
+            &crate::event::Event::from_log_line(
+                "2026-05-29T15:00:00+02:00\tboard-issue-loop\tweb\tpr-opened\tpr=#60",
+            )
+            .unwrap(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+
+        // First render (no hover) populates the click targets.
+        app.hover_pos = None;
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let (trow, tcol) = app
+            .click_targets
+            .iter()
+            .find(|t| t.url.ends_with("/pull/60"))
+            .map(|t| (t.row, t.col_start))
+            .expect("the PR link is a click target");
+
+        let cell_reversed = |terminal: &Terminal<TestBackend>, x: u16, y: u16| -> bool {
+            let buf = terminal.backend().buffer();
+            let w = buf.area.width;
+            buf.content[(y * w + x) as usize]
+                .modifier
+                .contains(Modifier::REVERSED)
+        };
+
+        // Without hover the link isn't highlighted (and isn't the selected row).
+        assert!(
+            !cell_reversed(&terminal, tcol, trow),
+            "the PR link is not reversed until hovered"
+        );
+
+        // Hovering the link's own screen cell lights it up — on its row, not a
+        // few rows above it (the off-by-`inner.y` regression).
+        app.hover_pos = Some((trow, tcol));
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        assert!(
+            cell_reversed(&terminal, tcol, trow),
+            "hovering the PR link reverses its own cell (no row offset)"
+        );
+    }
+
+    #[test]
     fn issue_column_keeps_titles_aligned() {
         use crate::work::{WorkItem, WorkKey, WorkState};
-        let app = app_with_one_agent();
         let ts = chrono::DateTime::parse_from_rfc3339("2026-05-29T15:00:00+02:00").unwrap();
         let mk = |key, issue, pr| WorkItem {
             key,
@@ -4110,7 +4174,7 @@ mod tests {
         let ticketed = mk(WorkKey::Issue(90), Some(90), Some(98));
         let ticketless = mk(WorkKey::Pr(60), None, Some(60));
         let text = |w: &WorkItem| {
-            build_work_item_line(w, None, None, 120, 0, 0, &app)
+            build_work_item_line(w, None, None, 120, 0, 0, None)
                 .0
                 .spans
                 .iter()
@@ -4440,6 +4504,46 @@ mod tests {
         let scr = screen(&terminal);
         assert!(scr.contains(&last), "last agent scrolled into view");
         assert!(!scr.contains(&first), "top agent scrolled off-view");
+    }
+
+    #[test]
+    fn clients_pane_shows_a_scrollbar_when_overflowing() {
+        let now = chrono::Local::now().fixed_offset();
+        let mut app = app_with_one_agent();
+        app.focus_mode = FocusMode::Clients;
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+
+        // One agent fits the pane: no scrollbar (arrows live only in the help
+        // overlay, which is closed here).
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        assert!(
+            !screen(&terminal).contains('↓'),
+            "no scrollbar when the roster fits the pane"
+        );
+
+        // Many agents overflow it: a scrollbar with ↑/↓ end-arrows appears.
+        app.roster = (0..30)
+            .map(|n| Agent {
+                name: format!("agent{n:02}"),
+                kind: ClientKind::Agent,
+                repo: "acme/x".into(),
+                board: "acme/14".into(),
+                role: None,
+                description: None,
+                state: AgentState::Idle,
+                task: None,
+                last_seen: Some(now),
+                stale: false,
+                unread: 0,
+                context_pct: None,
+            })
+            .collect();
+        app.tree_selected = 0;
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        assert!(
+            screen(&terminal).contains('↓'),
+            "a scrollbar end-arrow shows when the roster overflows the pane"
+        );
     }
 
     #[test]

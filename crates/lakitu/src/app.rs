@@ -1057,6 +1057,82 @@ impl App {
         self.follow_newest = false;
     }
 
+    /// Route a mouse-wheel notch to whatever scrollable surface is in front, so
+    /// the wheel scrolls *what you're looking at*: an open help/tasks/inbox
+    /// modal, else the focused pane — the Clients tree (the main view, which
+    /// scrolls to follow its selection) or the event stream. Text-entry /
+    /// confirm modals swallow the wheel so it never disturbs a selection hidden
+    /// behind them.
+    fn scroll_wheel(&mut self, down: bool) {
+        // Modals that own a text buffer or a yes/no choice: ignore the wheel.
+        if self.compose.is_some()
+            || self.new_project.is_some()
+            || self.rename_project.is_some()
+            || self.confirm_disconnect.is_some()
+            || self.show_story_for.is_some()
+        {
+            return;
+        }
+        // Help overlay: scroll its body (render clamps the offset).
+        if self.show_help {
+            self.help_scroll = if down {
+                self.help_scroll.saturating_add(3)
+            } else {
+                self.help_scroll.saturating_sub(3)
+            };
+            return;
+        }
+        // Tasks modal (when browsing, not typing): move the task selection.
+        if self.show_tasks_for.is_some() && self.task_input.is_none() {
+            if let Some(name) = self.show_tasks_for.clone() {
+                let tasks = self.tasks.get(&name).cloned().unwrap_or_default();
+                let n = store::task_display_order(&tasks).len();
+                if down {
+                    if self.tasks_selected + 1 < n {
+                        self.tasks_selected += 1;
+                    }
+                } else {
+                    self.tasks_selected = self.tasks_selected.saturating_sub(1);
+                }
+            }
+            return;
+        }
+        // Inbox modal: step through messages (mirrors j/k; resets body scroll).
+        if self.show_inbox_for.is_some() {
+            let len = self.open_inbox().len();
+            if down {
+                if self.inbox_selected + 1 < len {
+                    self.inbox_selected += 1;
+                }
+            } else {
+                self.inbox_selected = self.inbox_selected.saturating_sub(1);
+            }
+            self.inbox_scroll = 0;
+            return;
+        }
+        // Base view: the Clients tree follows the cursor; the event-stream pane
+        // uses its reversed-index scroll.
+        match self.focus_mode {
+            FocusMode::Clients => {
+                if down {
+                    if self.tree_selected + 1 < self.tree_rows.len() {
+                        self.tree_selected += 1;
+                    }
+                } else {
+                    self.tree_selected = self.tree_selected.saturating_sub(1);
+                }
+            }
+            _ => {
+                if down {
+                    let len = self.filtered_events().len();
+                    self.scroll_down(len);
+                } else {
+                    self.scroll_up();
+                }
+            }
+        }
+    }
+
     /// Open the first #N reference of the currently-selected event in
     /// the user's browser.
     fn open_selected(&self) {
@@ -2061,11 +2137,8 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
                 // Track hover position for visual hover affordance + status-bar URL hint.
                 app.hover_pos = Some((mouse.row, mouse.column));
             }
-            MouseEventKind::ScrollUp => app.scroll_up(),
-            MouseEventKind::ScrollDown => {
-                let len = app.filtered_events().len();
-                app.scroll_down(len);
-            }
+            MouseEventKind::ScrollUp => app.scroll_wheel(false),
+            MouseEventKind::ScrollDown => app.scroll_wheel(true),
             _ => {}
         },
         _ => {}
