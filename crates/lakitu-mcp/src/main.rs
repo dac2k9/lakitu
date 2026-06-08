@@ -1,20 +1,20 @@
-//! Agent-board MCP server.
+//! `lakitu-mcp` — the MCP server + coordination daemon behind Lakitu.
 //!
-//! Exposes the four Phase-1 primitives used by board-issue-loop and
-//! pr-review-fixup: `emit_event`, `move_card`, `set_blocker`,
-//! `clear_blocker`. Each wraps the deterministic side-effectful
-//! sequence that the LLM was previously re-deriving from skill markdown,
-//! collapsing 10–40 line bash incantations into a single tool call.
+//! Gives a fleet of Claude Code agents the tools to register, report presence,
+//! exchange messages, keep personal tasks and personas, and (optionally) drive
+//! a GitHub Projects board — all writing the shared `~/.claude/lakitu-fleet`
+//! store that the `lakitu` cockpit renders.
 //!
-//! Two transports, one tool surface:
-//!   * default (no args) — **stdio**, Claude Code's local MCP transport;
-//!   * `serve` — the **HTTP daemon** (`daemon::serve`), MCP-over-HTTP so agents
-//!     on other machines reach one shared fleet store (see `daemon.rs`).
-//! State-guard, idempotency, and ID-cache live here so the skill stays
-//! about decisions, not execution mechanics.
+//! Modes:
+//!   * default (no args) — **stdio**, Claude Code's local per-agent MCP transport;
+//!   * `serve` — the **HTTP daemon** (`daemon::serve`): MCP-over-HTTP plus a
+//!     `/v1` REST API so a fleet can span machines (see `daemon.rs`, `rest.rs`);
+//!   * `install-hooks` — materialize the lifecycle hooks + coordination skill
+//!     into `~/.claude` (see `install.rs`).
 
 mod daemon;
 mod fleet;
+mod install;
 mod persona;
 mod rest;
 mod server;
@@ -31,8 +31,13 @@ async fn main() -> Result<()> {
     init_tracing()?;
     match std::env::args().nth(1).as_deref() {
         Some("serve") => daemon::serve().await,
+        Some("install-hooks") => install::run(),
         Some(other) => {
-            anyhow::bail!("unknown subcommand {other:?} (use `serve`, or no args for stdio)")
+            anyhow::bail!(
+                "unknown subcommand {other:?} \
+                 (use `serve` for the HTTP daemon, `install-hooks` to set up the fleet \
+                 hooks, or no args for stdio)"
+            )
         }
         None => serve_stdio().await,
     }

@@ -41,17 +41,14 @@ a shared on-disk store; the cockpit renders it live.
 ## Install
 
 ```sh
-cargo install lakitu lakitu-mcp
+cargo install lakitu lakitu-mcp     # the two binaries
+lakitu-mcp install-hooks            # set up the fleet hooks + skill
 ```
 
-That gives you both binaries. Then install the fleet hooks + coordination skill
-(clone this repo and run the installer — it's idempotent and backs up your
-`settings.json`):
-
-```sh
-git clone https://github.com/dac2k9/lakitu && cd lakitu
-./scripts/install-fleet.sh
-```
+`install-hooks` writes the lifecycle hooks and the `fleet-coordination` skill
+into `~/.claude` and wires them into `settings.json` (backing it up first) — no
+clone needed, and it's idempotent. (If you'd rather work from a clone, running
+`./scripts/install-fleet.sh` does the same thing.)
 
 Bring an agent online (in the repo it works in):
 
