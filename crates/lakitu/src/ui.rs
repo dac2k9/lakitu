@@ -66,9 +66,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // Per section: a project divider is 1 row; a client is a header row + a box
     // (status + items + tasks + 2 borders). `section_height` is the shared
     // source so the pane size and the scroll math agree.
+    let est_tasks = rendered_open_tasks(app);
+    let est_items: Vec<crate::work::WorkItem> = app.work.sorted().into_iter().cloned().collect();
     let tree_lines: u16 = build_sections(app)
         .iter()
-        .map(|s| section_height(app, s, box_inner_w))
+        .map(|s| section_height(app, s, &est_tasks, &est_items, box_inner_w))
         .sum();
     // Clients pane is the main content now (work-items live inside each
     // client's box). Cap it at ~half-screen only when the standalone work
@@ -523,40 +525,88 @@ fn build_sections(app: &App) -> Vec<Section> {
 /// divider is 1; a client is a header row plus its box (status + items + open
 /// tasks + 2 borders, or nothing when empty). The single source for both the
 /// pane-size estimate (in `render`) and the scroll math (in `render_agents_pane`).
-fn section_height(app: &App, section: &Section, box_inner_w: u16) -> u16 {
+/// Open tasks that actually render in the tree (fold + the Tab toggle applied),
+/// across every client. Shared by the pane-size estimator and the renderer so
+/// the task-adoption math (which work-items move under a task) agrees in both.
+fn rendered_open_tasks(app: &App) -> Vec<crate::store::Task> {
+    app.roster
+        .iter()
+        .filter(|a| {
+            !app.collapsed.contains(&a.name)
+                && (app.show_client_tasks || a.kind == ClientKind::Human)
+        })
+        .filter_map(|a| app.tasks.get(&a.name))
+        .flat_map(|ts| ts.iter().filter(|t| !t.done).cloned())
+        .collect()
+}
+
+/// Box content rows for a client group: status lines + work-items NOT adopted
+/// by a task + the client's tasks + the work-item each task adopts as a child.
+/// The single source of truth for box height — shared by `section_height` (which
+/// sizes the off-screen buffer) and the renderer below, so the two can't drift
+/// and clip rows. `all_tasks` is the set of tasks that actually render (fold +
+/// Tab toggle already applied); `all_items` is every work-item, for resolving a
+/// task's linked board issue/PR (which may live in another client's repo).
+fn group_content_rows(
+    app: &App,
+    g: &ClientGroup,
+    all_tasks: &[crate::store::Task],
+    all_items: &[crate::work::WorkItem],
+    box_inner_w: u16,
+) -> u16 {
+    let status = match g.client {
+        Some(i)
+            if app.roster[i].kind == ClientKind::Agent
+                && app.roster[i]
+                    .task
+                    .as_deref()
+                    .map(|t| !t.trim().is_empty())
+                    .unwrap_or(false) =>
+        {
+            wrap_text(app.roster[i].task.as_deref().unwrap(), box_inner_w).len() as u16
+        }
+        _ => 0,
+    };
+    if app.collapsed.contains(&g.key) {
+        return status; // folded: items + tasks hidden, status still shows
+    }
+    // Work-items not adopted by any rendered task — adopted ones move under
+    // their task, so they don't also stand alone here.
+    let items = g
+        .items
+        .iter()
+        .filter(|w| !all_tasks.iter().any(|t| task_on_item(t, w)))
+        .count() as u16;
+    let (tasks, children) = match g.client {
+        Some(i) if app.show_client_tasks || app.roster[i].kind == ClientKind::Human => {
+            let open: Vec<&crate::store::Task> = app
+                .tasks
+                .get(&app.roster[i].name)
+                .map(|ts| ts.iter().filter(|t| !t.done).collect())
+                .unwrap_or_default();
+            let children = open
+                .iter()
+                .filter(|t| all_items.iter().any(|w| task_on_item(t, w)))
+                .count() as u16;
+            (open.len() as u16, children)
+        }
+        _ => (0, 0),
+    };
+    status + items + tasks + children
+}
+
+fn section_height(
+    app: &App,
+    section: &Section,
+    all_tasks: &[crate::store::Task],
+    all_items: &[crate::work::WorkItem],
+    box_inner_w: u16,
+) -> u16 {
     match section {
         Section::ProjectHeader(_) => 1,
         Section::Group(g) => {
-            let status_lines = match g.client {
-                Some(i)
-                    if app.roster[i].kind == ClientKind::Agent
-                        && app.roster[i]
-                            .task
-                            .as_deref()
-                            .map(|t| !t.trim().is_empty())
-                            .unwrap_or(false) =>
-                {
-                    wrap_text(app.roster[i].task.as_deref().unwrap(), box_inner_w).len() as u16
-                }
-                _ => 0,
-            };
-            let folded = app.collapsed.contains(&g.key);
-            let item_rows = if folded { 0 } else { g.items.len() as u16 };
-            let task_lines = match g.client {
-                Some(i)
-                    if !folded
-                        && (app.show_client_tasks || app.roster[i].kind == ClientKind::Human) =>
-                {
-                    app.tasks
-                        .get(&app.roster[i].name)
-                        .map(|ts| ts.iter().filter(|t| !t.done).count() as u16)
-                        .unwrap_or(0)
-                }
-                _ => 0,
-            };
-            let content = status_lines + item_rows + task_lines;
-            let box_h = if content > 0 { content + 2 } else { 0 };
-            1 + box_h
+            let content = group_content_rows(app, g, all_tasks, all_items, box_inner_w);
+            1 + if content > 0 { content + 2 } else { 0 }
         }
     }
 }
@@ -602,12 +652,21 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
     let avail = inner.height;
     const BOX_X: u16 = 3;
     let box_inner_w = inner.width.saturating_sub(BOX_X + 2);
+
+    // Tasks that actually render (fold + the Tab toggle applied), across every
+    // client — used to decide which work-items a task "adopts" as its child (so
+    // they get pulled out of their own section and shown under the task). The
+    // gate here mirrors the per-box one below. `all_items` resolves a task's
+    // linked board issue/PR, which may live in another client's repo.
+    let all_tasks = rendered_open_tasks(app);
+    let all_items: Vec<crate::work::WorkItem> = app.work.sorted().into_iter().cloned().collect();
+
     // The whole tree is rendered into an off-screen buffer of its full height,
     // then the visible window is blitted into the pane — scrolling to follow the
     // selection. This keeps boxes/borders intact (no partial-box clipping).
     let content_h: u16 = sections
         .iter()
-        .map(|s| section_height(app, s, box_inner_w))
+        .map(|s| section_height(app, s, &all_tasks, &all_items, box_inner_w))
         .sum::<u16>()
         .max(1);
     let cbuf_h = content_h.max(avail).max(1);
@@ -820,15 +879,16 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
             .map(|a| a.name.clone())
             .unwrap_or_default();
 
-        let item_rows = if collapsed { 0 } else { group.items.len() };
-        // One clipped line per open task (full text lives in the modal).
-        let content = status_lines.len() + item_rows + open_tasks.len();
+        // Box height from the shared `group_content_rows` so it matches exactly
+        // what the loop below renders (status + non-adopted items + tasks +
+        // adopted children) — otherwise rows clip or the box gaps.
+        let content = group_content_rows(app, group, &all_tasks, &all_items, box_inner_w);
         if content == 0 {
             continue;
         }
         // Full box height — content is rendered into the off-screen buffer in
         // full and scrolled, so no per-pane clipping here.
-        let box_h = content as u16 + 2;
+        let box_h = content + 2;
         let box_rect = Rect {
             x: inner.x + BOX_X,
             y: row_y,
@@ -867,9 +927,14 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
             off += 1;
         }
 
-        // 2. Work-items below the status (hidden when folded).
+        // 2. Work-items below the status (hidden when folded). Items a task has
+        // adopted render under their task in step 3, so skip them here.
         if !collapsed {
-            for w in &group.items {
+            for w in group
+                .items
+                .iter()
+                .filter(|w| !all_tasks.iter().any(|t| task_on_item(t, w)))
+            {
                 if off >= box_inner.height {
                     break;
                 }
@@ -923,47 +988,14 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
                 });
                 row_ys.push(iy);
                 off += 1;
-                // PR-linked tasks render as nested children beneath their item
-                // — the "subtree under the PR" view. Long text wraps. Each task
-                // is one selectable tree row (its wrapped lines share the cursor).
-                for t in open_tasks.iter().filter(|t| task_on_item(t, w)) {
-                    if off >= box_inner.height {
-                        break;
-                    }
-                    let task_sel = focused && rows.len() == selected;
-                    rows.push(TreeRow::Task {
-                        owner: task_owner.clone(),
-                        id: t.id.clone(),
-                        text: t.text.clone(),
-                    });
-                    row_ys.push(box_inner.y + off);
-                    let st = if task_sel {
-                        Style::default().add_modifier(Modifier::REVERSED)
-                    } else {
-                        Style::default()
-                    };
-                    Paragraph::new(task_line(t, stale, true, box_inner.width))
-                        .style(st)
-                        .render(
-                            Rect {
-                                x: box_inner.x,
-                                y: box_inner.y + off,
-                                width: box_inner.width,
-                                height: 1,
-                            },
-                            &mut cbuf,
-                        );
-                    off += 1;
-                }
             }
         }
 
-        // 3. Loose tasks (no PR, or a PR with no visible work-item row) — a flat
-        // checklist after the items. Empty when folded (open_tasks is empty then).
-        for t in open_tasks
-            .iter()
-            .filter(|t| !group.items.iter().any(|w| task_on_item(t, w)))
-        {
+        // 3. Tasks — each rendered flat under the client. A task linked to a
+        // board issue/PR adopts that work-item as an indented child row beneath
+        // it (the "what this client is working on" view); the work-item may live
+        // in another repo. Tasks with no live work-item just render on their own.
+        for t in &open_tasks {
             if off >= box_inner.height {
                 break;
             }
@@ -991,6 +1023,69 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
                     &mut cbuf,
                 );
             off += 1;
+
+            // The board issue/PR this task is linked to, as an indented child.
+            if let Some(w) = all_items.iter().find(|w| task_on_item(t, w)) {
+                if off >= box_inner.height {
+                    break;
+                }
+                let iy = box_inner.y + off;
+                let indent = 4u16; // aligns the child under the task's "☐ "
+                let meta_issue = w
+                    .issue
+                    .and_then(|n| app.titles.get(&(RefKind::Issue, n)).cloned().flatten());
+                let meta_pr =
+                    w.pr.and_then(|n| app.titles.get(&(RefKind::Pr, n)).cloned().flatten());
+                let (line, refs) = build_work_item_line(
+                    w,
+                    meta_issue.as_ref(),
+                    meta_pr.as_ref(),
+                    box_inner.width.saturating_sub(indent),
+                    box_inner.x + indent,
+                    iy,
+                    None,
+                );
+                let mut spans = line.spans;
+                spans.insert(0, Span::styled("  ↳ ", Style::default().fg(SECONDARY_FG)));
+                let mut style = Style::default();
+                if matches!(
+                    w.state,
+                    crate::work::WorkState::Done | crate::work::WorkState::Merged
+                ) {
+                    style = style.add_modifier(Modifier::DIM);
+                }
+                if focused && rows.len() == selected {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
+                Paragraph::new(Line::from(spans)).style(style).render(
+                    Rect {
+                        x: box_inner.x,
+                        y: iy,
+                        width: box_inner.width,
+                        height: 1,
+                    },
+                    &mut cbuf,
+                );
+                for (col_start, col_end, url) in refs {
+                    click_local.push((
+                        iy,
+                        box_inner.x + indent + col_start,
+                        box_inner.x + indent + col_end,
+                        url,
+                    ));
+                }
+                rows.push(TreeRow::Item {
+                    repo: w.repo.clone(),
+                    pr: w.pr,
+                    issue: w.issue,
+                    finished: matches!(
+                        w.state,
+                        crate::work::WorkState::Done | crate::work::WorkState::Merged
+                    ) || is_meta_done(app, w),
+                });
+                row_ys.push(iy);
+                off += 1;
+            }
         }
 
         row_y += box_h;
@@ -3414,6 +3509,66 @@ mod tests {
         assert!(
             !text.contains("[working]"),
             "state text label is gone — the dot conveys it"
+        );
+    }
+
+    #[test]
+    fn task_adopts_its_linked_work_item_as_a_child() {
+        use crate::store::{Task, TaskPr};
+        let mut app = app_with_one_agent();
+        app.show_client_tasks = true;
+        // A board PR opened in the agent's repo.
+        app.work.ingest(
+            &crate::event::Event::from_log_line(
+                "2026-05-29T15:00:00+02:00\tboard-issue-loop\tweb\tpr-opened\tissue=#187 pr=#188",
+            )
+            .unwrap(),
+        );
+        // A task on the agent's list, linked to that PR.
+        app.tasks.insert(
+            "vscode-bot".into(),
+            vec![Task {
+                id: "tk1".into(),
+                text: "wire the thing".into(),
+                body: None,
+                done: false,
+                created: None,
+                pr: Some(TaskPr {
+                    repo: "acme/web".into(),
+                    number: 188,
+                }),
+                from_msg: None,
+            }],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        // The linked work-item renders exactly once — as the task's child, never
+        // also standalone in its own section.
+        let n188 = app
+            .tree_rows
+            .iter()
+            .filter(|r| matches!(r, TreeRow::Item { pr: Some(188), .. }))
+            .count();
+        assert_eq!(
+            n188, 1,
+            "the linked work-item appears once (no standalone duplicate)"
+        );
+        // …and it sits directly beneath the task that adopts it.
+        let pos = app
+            .tree_rows
+            .iter()
+            .position(|r| matches!(r, TreeRow::Item { pr: Some(188), .. }))
+            .unwrap();
+        assert!(
+            matches!(app.tree_rows.get(pos - 1), Some(TreeRow::Task { .. })),
+            "the work-item is nested under the task above it"
+        );
+        let scr = screen(&terminal);
+        assert!(scr.contains("wire the thing"), "the task renders");
+        assert!(
+            scr.contains('↳') && scr.contains("PR #188"),
+            "the work-item shows as an indented child"
         );
     }
 
