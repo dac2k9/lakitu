@@ -180,7 +180,10 @@ impl WorkItems {
             key,
             issue,
             pr,
-            repo: ev.repo_with_owner(),
+            // Store the repo as the log recorded it (often a bare name); the
+            // owner is resolved from the live roster at render time via
+            // `app::resolve_repo`, which the ingest path can't see here.
+            repo: ev.repo.clone(),
             state: WorkState::Triaged,
             last_event: ev.timestamp,
             last_action: ev.action.clone(),

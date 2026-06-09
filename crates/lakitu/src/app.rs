@@ -1140,7 +1140,9 @@ impl App {
             return;
         };
         let Some(first) = ev.refs.first() else { return };
-        let url = first.kind.url(&ev.repo_with_owner(), first.number);
+        let url = first
+            .kind
+            .url(&resolve_repo(&ev.repo, &self.roster), first.number);
         let _ = webbrowser::open(&url);
     }
 
@@ -1151,10 +1153,11 @@ impl App {
         let Some(w) = self.work.get(issue) else {
             return;
         };
+        let repo = resolve_repo(&w.repo, &self.roster);
         let url = if let Some(pr) = w.pr {
-            RefKind::Pr.url(&w.repo, pr)
+            RefKind::Pr.url(&repo, pr)
         } else {
-            RefKind::Issue.url(&w.repo, issue)
+            RefKind::Issue.url(&repo, issue)
         };
         let _ = webbrowser::open(&url);
     }
@@ -1233,24 +1236,56 @@ impl App {
     }
 }
 
-impl Event {
-    /// Compose `owner/name` from the recorded `repo` field. The log often
-    /// records just the repo name (e.g. `web`), so a bare repo gets the default
-    /// owner — which MUST match the agents' `owner/name` repos, or the
-    /// work-item won't attribute to its client and falls into "Unassigned".
-    /// Overridable per fleet via `LAKITU_DEFAULT_OWNER` (e.g. `fossid-ab`);
-    /// defaults to `acme` when unset.
-    pub fn repo_with_owner(&self) -> String {
-        if self.repo.contains('/') {
-            self.repo.clone()
-        } else {
-            let owner = std::env::var("LAKITU_DEFAULT_OWNER")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "acme".to_string());
-            format!("{owner}/{}", self.repo)
+/// Resolve a repo string to a full `owner/name` slug. The agent log often records
+/// just the bare repo name (e.g. `fossid-vscode`); the registered agents carry
+/// full slugs, so we infer the owner from them — matching the bare name to the
+/// agent that owns a repo with that basename (handles multi-org fleets, e.g.
+/// `local/codex` alongside `fossid-ab/*`). Falls back to the fleet's most common
+/// owner, then an optional `LAKITU_DEFAULT_OWNER`, then leaves it bare. Inferring
+/// from the roster means no per-machine env var is needed.
+pub(crate) fn resolve_repo(repo: &str, roster: &[Agent]) -> String {
+    if repo.contains('/') {
+        return repo.to_string();
+    }
+    // 1. An agent whose repo basename matches → adopt that agent's owner.
+    for a in roster {
+        if let Some((owner, name)) = a.repo.split_once('/') {
+            if name == repo && !owner.is_empty() {
+                return format!("{owner}/{repo}");
+            }
         }
     }
+    // 2. The fleet's most common owner (single-org fleets resolve cleanly).
+    if let Some(owner) = most_common_owner(roster) {
+        return format!("{owner}/{repo}");
+    }
+    // 3. Optional explicit override; otherwise leave it bare.
+    match std::env::var("LAKITU_DEFAULT_OWNER")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        Some(owner) => format!("{owner}/{repo}"),
+        None => repo.to_string(),
+    }
+}
+
+/// The owner prefix shared by the most registered agents — the fleet's org, used
+/// to resolve a bare repo that matches no agent by name. `None` if no agent has
+/// an `owner/name` repo.
+fn most_common_owner(roster: &[Agent]) -> Option<String> {
+    use std::collections::HashMap;
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for a in roster {
+        if let Some((owner, _)) = a.repo.split_once('/') {
+            if !owner.is_empty() && owner != "-" {
+                *counts.entry(owner).or_default() += 1;
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|&(_, n)| n)
+        .map(|(owner, _)| owner.to_string())
 }
 
 pub async fn run(
@@ -2234,6 +2269,41 @@ fn audit_log_path() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_repo_infers_owner_from_the_roster() {
+        fn ag(repo: &str) -> Agent {
+            Agent {
+                name: "n".into(),
+                kind: crate::store::ClientKind::Agent,
+                repo: repo.into(),
+                board: "-".into(),
+                role: None,
+                description: None,
+                state: crate::store::AgentState::Idle,
+                task: None,
+                last_seen: None,
+                stale: false,
+                unread: 0,
+                context_pct: None,
+            }
+        }
+        let roster = vec![
+            ag("fossid-ab/fossid-vscode"),
+            ag("local/codex"),
+            ag("fossid-ab/fossid-mcp"),
+        ];
+        // A bare name matching an agent's repo basename → that agent's owner.
+        assert_eq!(
+            resolve_repo("fossid-vscode", &roster),
+            "fossid-ab/fossid-vscode"
+        );
+        assert_eq!(resolve_repo("codex", &roster), "local/codex");
+        // Already-qualified passes through untouched.
+        assert_eq!(resolve_repo("acme/x", &roster), "acme/x");
+        // No name match → the fleet's most common owner (fossid-ab here).
+        assert_eq!(resolve_repo("mystery", &roster), "fossid-ab/mystery");
+    }
 
     #[test]
     fn insert_and_backspace_at_caret() {

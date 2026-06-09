@@ -398,7 +398,16 @@ struct ClientGroup {
 /// client repo), with an "Unassigned" group for items whose repo matches no
 /// registered client. Returns owned data (clones), so callers can mutate App.
 fn client_tree(app: &App) -> Vec<ClientGroup> {
-    let items = visible_work_items(app);
+    // Resolve each work-item's repo to a full owner/name slug from the roster,
+    // so bare log repos (e.g. `fossid-vscode`) match their owning agent — and
+    // produce correct GitHub links — instead of falling into "Unassigned".
+    let items: Vec<WorkItem> = visible_work_items(app)
+        .into_iter()
+        .map(|mut w| {
+            w.repo = crate::app::resolve_repo(&w.repo, &app.roster);
+            w
+        })
+        .collect();
     let repos: std::collections::HashSet<&str> =
         app.roster.iter().map(|a| a.repo.as_str()).collect();
     let mut groups: Vec<ClientGroup> = app
@@ -659,7 +668,16 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
     // gate here mirrors the per-box one below. `all_items` resolves a task's
     // linked board issue/PR, which may live in another client's repo.
     let all_tasks = rendered_open_tasks(app);
-    let all_items: Vec<crate::work::WorkItem> = app.work.sorted().into_iter().cloned().collect();
+    let all_items: Vec<crate::work::WorkItem> = app
+        .work
+        .sorted()
+        .into_iter()
+        .map(|w| {
+            let mut w = w.clone();
+            w.repo = crate::app::resolve_repo(&w.repo, &app.roster);
+            w
+        })
+        .collect();
 
     // The whole tree is rendered into an off-screen buffer of its full height,
     // then the visible window is blitted into the pane — scrolling to follow the
@@ -2019,7 +2037,8 @@ fn build_event_line<'a>(
         targets.push((
             col_start_abs,
             col_end_abs,
-            r.kind.url(&e.repo_with_owner(), r.number),
+            r.kind
+                .url(&crate::app::resolve_repo(&e.repo, &app.roster), r.number),
         ));
         cursor = r.start + r.len;
     }
