@@ -29,10 +29,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rmcp::{
-    ErrorData as McpError, ServerHandler,
+    ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
-    schemars, tool, tool_handler, tool_router,
+    schemars,
+    service::RequestContext,
+    tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
 use tokio::sync::RwLock;
@@ -1122,21 +1124,35 @@ impl AgentBoardService {
         Codex) that wants to PARK its current turn and resume it in-thread the moment mail \
         arrives, rather than spawning a throwaway wake that loses chat context. Returns at once \
         if unread mail already exists; otherwise polls the inbox about every 2s. IMPORTANT: this \
-        holds the tool call open for the whole wait, so your MCP client's per-request timeout \
-        must exceed `timeout_sec`, or the call errors before mail arrives — park-and-repeat for \
-        longer idles. While parked, consider a heartbeat with state=waiting, task=\"waiting for \
-        inbox\". Default timeout 300s; capped at 3600s."
+        holds the tool call open for the whole wait. To survive a client whose per-call watchdog \
+        fires on inactivity (e.g. Codex at ~120s), it emits a progress notification about every 25s \
+        while parked (`still_waiting elapsed=Ns`) to keep the channel active — automatic, no caller \
+        setup or progressToken needed. (A client with a hard wall-clock per-request cap still needs \
+        that cap to exceed `timeout_sec` — park-and-repeat for longer idles.) While parked, consider \
+        a heartbeat with state=waiting, task=\"waiting for inbox\". Default timeout 300s; capped at 3600s."
     )]
     async fn wait_for_message(
         &self,
         Parameters(req): Parameters<WaitForMessageRequest>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         const MAX_WAIT: u64 = 3600; // hard cap (1h) regardless of request
         const POLL: u64 = 2; // seconds between inbox checks
+        const PING: u64 = 25; // seconds between keepalive progress notifications
         let timeout = req.timeout_sec.unwrap_or(300).min(MAX_WAIT);
         let name = fleet::sanitize(&req.name);
+        // A progress token to address keepalive notifications to: the caller's
+        // if it supplied one, else a generated one. Codex's tool wrapper can't
+        // pass a progressToken, so without this fallback its long parks get no
+        // keepalive traffic and its ~120s inactivity watchdog aborts the call.
+        // The token mainly labels the notification; the periodic traffic itself
+        // is what keeps the channel active (over stdio it's written regardless).
+        let progress_token = ctx.meta.get_progress_token().unwrap_or_else(|| {
+            ProgressToken(NumberOrString::String(Arc::from(format!("waitmsg:{name}"))))
+        });
 
         let mut waited = 0u64;
+        let mut last_ping = 0u64;
         loop {
             // Peek WITHOUT consuming: leave the mail unread so the agent's
             // resumed turn triages it normally via read_inbox.
@@ -1159,6 +1175,24 @@ impl AgentBoardService {
                 return Ok(text(format!(
                     "status=timeout  unread=0  inbox='{name}'  (waited {timeout}s, no new mail)"
                 )));
+            }
+            // Keepalive: a periodic progress notification keeps an
+            // inactivity-based client watchdog from firing during a long, quiet
+            // wait. Always emitted (token generated above if the caller gave
+            // none). Best-effort — ignore send errors.
+            if waited - last_ping >= PING {
+                let _ = ctx
+                    .peer
+                    .send_notification(ServerNotification::ProgressNotification(
+                        ProgressNotification::new(ProgressNotificationParam {
+                            progress_token: progress_token.clone(),
+                            progress: waited as f64,
+                            total: Some(timeout as f64),
+                            message: Some(format!("still_waiting elapsed={waited}s unread=0")),
+                        }),
+                    ))
+                    .await;
+                last_ping = waited;
             }
             let step = POLL.min(timeout - waited);
             tokio::time::sleep(std::time::Duration::from_secs(step)).await;
