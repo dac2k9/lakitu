@@ -40,7 +40,7 @@ use crate::log;
 use crate::remote::{self, WriteCmd};
 use crate::store::{self, Agent, Message, Project, StoreSnapshot, Task, Usage};
 use crate::ui;
-use crate::work::{WorkItems, WorkState};
+use crate::work::{WorkItems, WorkKey, WorkState};
 
 const TICK_MS: u64 = 80;
 const SKILL_FILTERS: &[Option<&str>] = &[None, Some("board-issue-loop"), Some("pr-review-fixup")];
@@ -222,14 +222,11 @@ pub enum TreeRow {
     /// A client header — index into `roster`. Enter opens its inbox.
     Client(usize),
     /// A work-item under a client. Enter opens the PR (or the issue if there's
-    /// no PR); Shift+Enter opens the issue; `x` dismisses it when `finished`.
+    /// no PR); Shift+Enter opens the issue; `x` dismisses it from the board.
     Item {
         repo: String,
         pr: Option<u64>,
         issue: Option<u64>,
-        /// True when the item is Done/Merged (or gh says so) — i.e. eligible to
-        /// be dismissed from the view with `x`.
-        finished: bool,
     },
     /// A task under a client (or under you). Enter opens the tasks modal at it;
     /// `c` composes a message about it (to that client, or pick a recipient for
@@ -292,11 +289,13 @@ pub struct App {
     /// `focus_mode == DoneReview`. Reset to 0 each time the user
     /// re-enters DoneReview mode.
     pub done_selected: usize,
-    /// Issue numbers the supervisor has dismissed from the Done view.
-    /// Populated by ingesting `card-acknowledged` events from the audit
-    /// log (so dismissals survive restarts). Items in this set are
-    /// hidden from `visible_work_items` even though their state is Done.
-    pub acknowledged: HashSet<u64>,
+    /// Work-items the supervisor has dismissed from the board — via `x` on any
+    /// item, or `c` in the story modal. Keyed by `WorkKey` so an item of any
+    /// kind (issue- or PR-keyed) and any state can be hidden. Populated by
+    /// ingesting `card-acknowledged` events from the audit log, so dismissals
+    /// survive restarts and propagate to sibling TUIs. Items in this set are
+    /// hidden from `visible_work_items`.
+    pub acknowledged: HashSet<WorkKey>,
     /// When `Some(issue_number)`, the story modal is open for that
     /// issue. Enter from DoneReview sets this; `c` (close+ack) or `esc`
     /// (close only) clears it.
@@ -999,7 +998,8 @@ impl App {
             .into_iter()
             .filter(|w| {
                 w.state == WorkState::Done
-                    && w.issue.is_some_and(|i| !self.acknowledged.contains(&i))
+                    && w.issue.is_some()
+                    && !self.acknowledged.contains(&w.key)
             })
             .collect()
     }
@@ -1140,7 +1140,9 @@ impl App {
             return;
         };
         let Some(first) = ev.refs.first() else { return };
-        let url = first.kind.url(&ev.repo_with_owner(), first.number);
+        let url = first
+            .kind
+            .url(&resolve_repo(&ev.repo, &self.roster), first.number);
         let _ = webbrowser::open(&url);
     }
 
@@ -1151,10 +1153,11 @@ impl App {
         let Some(w) = self.work.get(issue) else {
             return;
         };
+        let repo = resolve_repo(&w.repo, &self.roster);
         let url = if let Some(pr) = w.pr {
-            RefKind::Pr.url(&w.repo, pr)
+            RefKind::Pr.url(&repo, pr)
         } else {
-            RefKind::Issue.url(&w.repo, issue)
+            RefKind::Issue.url(&repo, issue)
         };
         let _ = webbrowser::open(&url);
     }
@@ -1233,19 +1236,56 @@ impl App {
     }
 }
 
-impl Event {
-    /// Compose `owner/name` from the recorded `repo` field. The log
-    /// currently records just the repo name (e.g. `web`);
-    /// hard-code the owner here. Future: thread the owner through the
-    /// log helper.
-    pub fn repo_with_owner(&self) -> String {
-        const DEFAULT_OWNER: &str = "acme";
-        if self.repo.contains('/') {
-            self.repo.clone()
-        } else {
-            format!("{DEFAULT_OWNER}/{}", self.repo)
+/// Resolve a repo string to a full `owner/name` slug. The agent log often records
+/// just the bare repo name (e.g. `fossid-vscode`); the registered agents carry
+/// full slugs, so we infer the owner from them — matching the bare name to the
+/// agent that owns a repo with that basename (handles multi-org fleets, e.g.
+/// `local/codex` alongside `fossid-ab/*`). Falls back to the fleet's most common
+/// owner, then an optional `LAKITU_DEFAULT_OWNER`, then leaves it bare. Inferring
+/// from the roster means no per-machine env var is needed.
+pub(crate) fn resolve_repo(repo: &str, roster: &[Agent]) -> String {
+    if repo.contains('/') {
+        return repo.to_string();
+    }
+    // 1. An agent whose repo basename matches → adopt that agent's owner.
+    for a in roster {
+        if let Some((owner, name)) = a.repo.split_once('/') {
+            if name == repo && !owner.is_empty() {
+                return format!("{owner}/{repo}");
+            }
         }
     }
+    // 2. The fleet's most common owner (single-org fleets resolve cleanly).
+    if let Some(owner) = most_common_owner(roster) {
+        return format!("{owner}/{repo}");
+    }
+    // 3. Optional explicit override; otherwise leave it bare.
+    match std::env::var("LAKITU_DEFAULT_OWNER")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        Some(owner) => format!("{owner}/{repo}"),
+        None => repo.to_string(),
+    }
+}
+
+/// The owner prefix shared by the most registered agents — the fleet's org, used
+/// to resolve a bare repo that matches no agent by name. `None` if no agent has
+/// an `owner/name` repo.
+fn most_common_owner(roster: &[Agent]) -> Option<String> {
+    use std::collections::HashMap;
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for a in roster {
+        if let Some((owner, _)) = a.repo.split_once('/') {
+            if !owner.is_empty() && owner != "-" {
+                *counts.entry(owner).or_default() += 1;
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|&(_, n)| n)
+        .map(|(owner, _)| owner.to_string())
 }
 
 pub async fn run(
@@ -1364,10 +1404,18 @@ async fn event_loop<B: ratatui::backend::Backend>(
                 // so re-runs (and other TUI instances watching the same log)
                 // honor the same dismissals.
                 if ev.action == "card-acknowledged" {
-                    if let Some(issue) = ev.refs.iter().find_map(|r| {
-                        matches!(r.kind, RefKind::Issue).then_some(r.number)
-                    }) {
-                        app.acknowledged.insert(issue);
+                    // Keyed by WorkKey: an `issue=#n` row hides the issue-keyed
+                    // item, a `pr=#n` row a PR-only item.
+                    for r in &ev.refs {
+                        match r.kind {
+                            RefKind::Issue => {
+                                app.acknowledged.insert(WorkKey::Issue(r.number));
+                            }
+                            RefKind::Pr => {
+                                app.acknowledged.insert(WorkKey::Pr(r.number));
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 app.work.ingest(&ev);
@@ -1755,8 +1803,8 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
                     if let Some(issue) = app.show_story_for {
                         // Persist via the audit log so dismissal survives
                         // restarts and propagates to sibling TUIs.
-                        let _ = append_acknowledgement(issue);
-                        app.acknowledged.insert(issue);
+                        let _ = append_acknowledgement(WorkKey::Issue(issue));
+                        app.acknowledged.insert(WorkKey::Issue(issue));
                     }
                     app.show_story_for = None;
                     // Rebound selection: if the list shrank past the
@@ -2028,15 +2076,21 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
             // acknowledges its issue so it drops out (persisted to the audit
             // log so it stays gone). No-op on active or ticketless items.
             KeyCode::Char('x') if app.focus_mode == FocusMode::Clients => {
-                if let Some(TreeRow::Item {
-                    issue: Some(n),
-                    finished: true,
-                    ..
-                }) = app.tree_rows.get(app.tree_selected)
-                {
-                    let n = *n;
-                    let _ = append_acknowledgement(n);
-                    app.acknowledged.insert(n);
+                // Dismiss the selected work-item from the board — any state, not
+                // just finished. Keyed by the issue when ticketed, else the PR.
+                // Persisted to the audit log so it stays gone across restarts.
+                let key = match app.tree_rows.get(app.tree_selected) {
+                    Some(TreeRow::Item { issue: Some(n), .. }) => Some(WorkKey::Issue(*n)),
+                    Some(TreeRow::Item {
+                        pr: Some(n),
+                        issue: None,
+                        ..
+                    }) => Some(WorkKey::Pr(*n)),
+                    _ => None,
+                };
+                if let Some(key) = key {
+                    let _ = append_acknowledgement(key);
+                    app.acknowledged.insert(key);
                 }
             }
             // Projects (Clients focus): `P` new project, `m` cycle the selected
@@ -2201,12 +2255,16 @@ fn trim_transparent(img: image::DynamicImage) -> image::DynamicImage {
 /// session, but the dismissal won't survive a restart. We don't error
 /// to the user because the alternative (a modal saying "couldn't write
 /// log") is worse UX for a TUI niceity.
-fn append_acknowledgement(issue: u64) -> std::io::Result<()> {
+fn append_acknowledgement(key: WorkKey) -> std::io::Result<()> {
     use std::io::Write;
     let ts = chrono::Local::now()
         .format("%Y-%m-%dT%H:%M:%S%:z")
         .to_string();
-    let line = format!("{ts}\tlakitu-tui\tweb\tcard-acknowledged\tissue=#{issue}\n");
+    let detail = match key {
+        WorkKey::Issue(n) => format!("issue=#{n}"),
+        WorkKey::Pr(n) => format!("pr=#{n}"),
+    };
+    let line = format!("{ts}\tlakitu-tui\tweb\tcard-acknowledged\t{detail}\n");
     let path = audit_log_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -2229,6 +2287,41 @@ fn audit_log_path() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_repo_infers_owner_from_the_roster() {
+        fn ag(repo: &str) -> Agent {
+            Agent {
+                name: "n".into(),
+                kind: crate::store::ClientKind::Agent,
+                repo: repo.into(),
+                board: "-".into(),
+                role: None,
+                description: None,
+                state: crate::store::AgentState::Idle,
+                task: None,
+                last_seen: None,
+                stale: false,
+                unread: 0,
+                context_pct: None,
+            }
+        }
+        let roster = vec![
+            ag("fossid-ab/fossid-vscode"),
+            ag("local/codex"),
+            ag("fossid-ab/fossid-mcp"),
+        ];
+        // A bare name matching an agent's repo basename → that agent's owner.
+        assert_eq!(
+            resolve_repo("fossid-vscode", &roster),
+            "fossid-ab/fossid-vscode"
+        );
+        assert_eq!(resolve_repo("codex", &roster), "local/codex");
+        // Already-qualified passes through untouched.
+        assert_eq!(resolve_repo("acme/x", &roster), "acme/x");
+        // No name match → the fleet's most common owner (fossid-ab here).
+        assert_eq!(resolve_repo("mystery", &roster), "fossid-ab/mystery");
+    }
 
     #[test]
     fn insert_and_backspace_at_caret() {
