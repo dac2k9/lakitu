@@ -1234,16 +1234,21 @@ impl App {
 }
 
 impl Event {
-    /// Compose `owner/name` from the recorded `repo` field. The log
-    /// currently records just the repo name (e.g. `web`);
-    /// hard-code the owner here. Future: thread the owner through the
-    /// log helper.
+    /// Compose `owner/name` from the recorded `repo` field. The log often
+    /// records just the repo name (e.g. `web`), so a bare repo gets the default
+    /// owner — which MUST match the agents' `owner/name` repos, or the
+    /// work-item won't attribute to its client and falls into "Unassigned".
+    /// Overridable per fleet via `LAKITU_DEFAULT_OWNER` (e.g. `fossid-ab`);
+    /// defaults to `acme` when unset.
     pub fn repo_with_owner(&self) -> String {
-        const DEFAULT_OWNER: &str = "acme";
         if self.repo.contains('/') {
             self.repo.clone()
         } else {
-            format!("{DEFAULT_OWNER}/{}", self.repo)
+            let owner = std::env::var("LAKITU_DEFAULT_OWNER")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "acme".to_string());
+            format!("{owner}/{}", self.repo)
         }
     }
 }

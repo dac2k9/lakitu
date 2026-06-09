@@ -93,6 +93,7 @@ lakitu
 |---|---|---|
 | `LAKITU_FLEET_ROOT` | all | Store location (default `~/.claude/lakitu-fleet`). |
 | `LAKITU_FLEET_NAME` | hooks/agents | This agent's stable name. |
+| `LAKITU_DEFAULT_OWNER` | lakitu | Owner prepended to bare repo names in the log so work-items attribute to their agent (default `acme`). Set to your org, or items land in "Unassigned". |
 | `LAKITU_DEFAULT_REPO` | lakitu-mcp | `owner/name` default for board tools. |
 | `LAKITU_DEFAULT_BOARD` | lakitu-mcp | `owner/projectNumber` board fallback. |
 | `LAKITU_FLEET_SERVER` / `LAKITU_FLEET_TOKEN` | remote | Daemon URL + bearer token. |
