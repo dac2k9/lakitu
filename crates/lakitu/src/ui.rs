@@ -67,7 +67,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // (status + items + tasks + 2 borders). `section_height` is the shared
     // source so the pane size and the scroll math agree.
     let est_tasks = rendered_open_tasks(app);
-    let est_items: Vec<crate::work::WorkItem> = app.work.sorted().into_iter().cloned().collect();
+    let est_items: Vec<crate::work::WorkItem> = app
+        .work
+        .sorted()
+        .into_iter()
+        .filter(|w| !app.acknowledged.contains(&w.key))
+        .cloned()
+        .collect();
     let tree_lines: u16 = build_sections(app)
         .iter()
         .map(|s| section_height(app, s, &est_tasks, &est_items, box_inner_w))
@@ -672,6 +678,7 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
         .work
         .sorted()
         .into_iter()
+        .filter(|w| !app.acknowledged.contains(&w.key))
         .map(|w| {
             let mut w = w.clone();
             w.repo = crate::app::resolve_repo(&w.repo, &app.roster);
@@ -999,10 +1006,6 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
                     repo: w.repo.clone(),
                     pr: w.pr,
                     issue: w.issue,
-                    finished: matches!(
-                        w.state,
-                        crate::work::WorkState::Done | crate::work::WorkState::Merged
-                    ) || is_meta_done(app, w),
                 });
                 row_ys.push(iy);
                 off += 1;
@@ -1096,10 +1099,6 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
                     repo: w.repo.clone(),
                     pr: w.pr,
                     issue: w.issue,
-                    finished: matches!(
-                        w.state,
-                        crate::work::WorkState::Done | crate::work::WorkState::Merged
-                    ) || is_meta_done(app, w),
                 });
                 row_ys.push(iy);
                 off += 1;
@@ -1621,8 +1620,12 @@ fn visible_work_items(app: &App) -> Vec<WorkItem> {
             // ticketless (nothing to retire).
             let finished =
                 matches!(w.state, crate::work::WorkState::Merged) || is_meta_done(app, w);
+            // Retire from the active view when: the agent moved the card to Done;
+            // a ticketless finished item (nothing left to retire it); or the
+            // supervisor dismissed it with `x` / `c` (any item, any state).
             let retire = w.state == crate::work::WorkState::Done
-                || (finished && w.issue.is_none_or(|i| app.acknowledged.contains(&i)));
+                || (finished && w.issue.is_none())
+                || app.acknowledged.contains(&w.key);
             !retire
         })
         .cloned()
@@ -2158,7 +2161,7 @@ fn render_help_overlay(frame: &mut Frame, app: &mut App) {
             "  enter         client: inbox · ticket: open the PR · task: open the tasks list",
         ),
         Line::from("  shift+enter   on a ticket: open the issue (the board ticket)"),
-        Line::from("  x             dismiss a finished (Done/Merged) ticket from the view"),
+        Line::from("  x             dismiss the selected work-item from the board (persists)"),
         Line::from("  space         fold / unfold the selected client's work-items"),
         Line::from("  t             open the tasks list for the selected client"),
         Line::from("  m             move a client between Floating and projects"),
@@ -4177,18 +4180,41 @@ mod tests {
                 r,
                 TreeRow::Item {
                     issue: Some(191),
-                    finished: true,
                     ..
                 }
             )),
-            "row is marked finished (x would dismiss it)"
+            "the merged ticket is a selectable row (x would dismiss it)"
         );
         // `x` → acknowledged → drops out of the view.
-        app.acknowledged.insert(191);
+        app.acknowledged.insert(crate::work::WorkKey::Issue(191));
         terminal.draw(|f| render(f, &mut app)).unwrap();
         assert!(
             !screen(&terminal).contains("#191"),
             "dismissed ticket is hidden"
+        );
+    }
+
+    #[test]
+    fn x_dismisses_an_unfinished_item_not_just_done_merged() {
+        let mut app = app_with_one_agent();
+        // A blocked, non-finished work-item — like the parked #79/#87/#89 that
+        // sit waiting on a human and shouldn't clutter the board.
+        app.work.ingest(
+            &crate::event::Event::from_log_line(
+                "2026-05-29T15:00:00+02:00\tboard-issue-loop\tweb\tblocked\tissue=#77 reason=product-decision",
+            )
+            .unwrap(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        assert!(screen(&terminal).contains("#77"), "blocked item shows");
+
+        // Dismissing it (what `x` does) hides it even though it isn't finished.
+        app.acknowledged.insert(crate::work::WorkKey::Issue(77));
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        assert!(
+            !screen(&terminal).contains("#77"),
+            "a dismissed blocked item is hidden"
         );
     }
 

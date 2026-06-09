@@ -40,7 +40,7 @@ use crate::log;
 use crate::remote::{self, WriteCmd};
 use crate::store::{self, Agent, Message, Project, StoreSnapshot, Task, Usage};
 use crate::ui;
-use crate::work::{WorkItems, WorkState};
+use crate::work::{WorkItems, WorkKey, WorkState};
 
 const TICK_MS: u64 = 80;
 const SKILL_FILTERS: &[Option<&str>] = &[None, Some("board-issue-loop"), Some("pr-review-fixup")];
@@ -222,14 +222,11 @@ pub enum TreeRow {
     /// A client header — index into `roster`. Enter opens its inbox.
     Client(usize),
     /// A work-item under a client. Enter opens the PR (or the issue if there's
-    /// no PR); Shift+Enter opens the issue; `x` dismisses it when `finished`.
+    /// no PR); Shift+Enter opens the issue; `x` dismisses it from the board.
     Item {
         repo: String,
         pr: Option<u64>,
         issue: Option<u64>,
-        /// True when the item is Done/Merged (or gh says so) — i.e. eligible to
-        /// be dismissed from the view with `x`.
-        finished: bool,
     },
     /// A task under a client (or under you). Enter opens the tasks modal at it;
     /// `c` composes a message about it (to that client, or pick a recipient for
@@ -292,11 +289,13 @@ pub struct App {
     /// `focus_mode == DoneReview`. Reset to 0 each time the user
     /// re-enters DoneReview mode.
     pub done_selected: usize,
-    /// Issue numbers the supervisor has dismissed from the Done view.
-    /// Populated by ingesting `card-acknowledged` events from the audit
-    /// log (so dismissals survive restarts). Items in this set are
-    /// hidden from `visible_work_items` even though their state is Done.
-    pub acknowledged: HashSet<u64>,
+    /// Work-items the supervisor has dismissed from the board — via `x` on any
+    /// item, or `c` in the story modal. Keyed by `WorkKey` so an item of any
+    /// kind (issue- or PR-keyed) and any state can be hidden. Populated by
+    /// ingesting `card-acknowledged` events from the audit log, so dismissals
+    /// survive restarts and propagate to sibling TUIs. Items in this set are
+    /// hidden from `visible_work_items`.
+    pub acknowledged: HashSet<WorkKey>,
     /// When `Some(issue_number)`, the story modal is open for that
     /// issue. Enter from DoneReview sets this; `c` (close+ack) or `esc`
     /// (close only) clears it.
@@ -999,7 +998,8 @@ impl App {
             .into_iter()
             .filter(|w| {
                 w.state == WorkState::Done
-                    && w.issue.is_some_and(|i| !self.acknowledged.contains(&i))
+                    && w.issue.is_some()
+                    && !self.acknowledged.contains(&w.key)
             })
             .collect()
     }
@@ -1404,10 +1404,18 @@ async fn event_loop<B: ratatui::backend::Backend>(
                 // so re-runs (and other TUI instances watching the same log)
                 // honor the same dismissals.
                 if ev.action == "card-acknowledged" {
-                    if let Some(issue) = ev.refs.iter().find_map(|r| {
-                        matches!(r.kind, RefKind::Issue).then_some(r.number)
-                    }) {
-                        app.acknowledged.insert(issue);
+                    // Keyed by WorkKey: an `issue=#n` row hides the issue-keyed
+                    // item, a `pr=#n` row a PR-only item.
+                    for r in &ev.refs {
+                        match r.kind {
+                            RefKind::Issue => {
+                                app.acknowledged.insert(WorkKey::Issue(r.number));
+                            }
+                            RefKind::Pr => {
+                                app.acknowledged.insert(WorkKey::Pr(r.number));
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 app.work.ingest(&ev);
@@ -1795,8 +1803,8 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
                     if let Some(issue) = app.show_story_for {
                         // Persist via the audit log so dismissal survives
                         // restarts and propagates to sibling TUIs.
-                        let _ = append_acknowledgement(issue);
-                        app.acknowledged.insert(issue);
+                        let _ = append_acknowledgement(WorkKey::Issue(issue));
+                        app.acknowledged.insert(WorkKey::Issue(issue));
                     }
                     app.show_story_for = None;
                     // Rebound selection: if the list shrank past the
@@ -2068,15 +2076,21 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
             // acknowledges its issue so it drops out (persisted to the audit
             // log so it stays gone). No-op on active or ticketless items.
             KeyCode::Char('x') if app.focus_mode == FocusMode::Clients => {
-                if let Some(TreeRow::Item {
-                    issue: Some(n),
-                    finished: true,
-                    ..
-                }) = app.tree_rows.get(app.tree_selected)
-                {
-                    let n = *n;
-                    let _ = append_acknowledgement(n);
-                    app.acknowledged.insert(n);
+                // Dismiss the selected work-item from the board — any state, not
+                // just finished. Keyed by the issue when ticketed, else the PR.
+                // Persisted to the audit log so it stays gone across restarts.
+                let key = match app.tree_rows.get(app.tree_selected) {
+                    Some(TreeRow::Item { issue: Some(n), .. }) => Some(WorkKey::Issue(*n)),
+                    Some(TreeRow::Item {
+                        pr: Some(n),
+                        issue: None,
+                        ..
+                    }) => Some(WorkKey::Pr(*n)),
+                    _ => None,
+                };
+                if let Some(key) = key {
+                    let _ = append_acknowledgement(key);
+                    app.acknowledged.insert(key);
                 }
             }
             // Projects (Clients focus): `P` new project, `m` cycle the selected
@@ -2241,12 +2255,16 @@ fn trim_transparent(img: image::DynamicImage) -> image::DynamicImage {
 /// session, but the dismissal won't survive a restart. We don't error
 /// to the user because the alternative (a modal saying "couldn't write
 /// log") is worse UX for a TUI niceity.
-fn append_acknowledgement(issue: u64) -> std::io::Result<()> {
+fn append_acknowledgement(key: WorkKey) -> std::io::Result<()> {
     use std::io::Write;
     let ts = chrono::Local::now()
         .format("%Y-%m-%dT%H:%M:%S%:z")
         .to_string();
-    let line = format!("{ts}\tlakitu-tui\tweb\tcard-acknowledged\tissue=#{issue}\n");
+    let detail = match key {
+        WorkKey::Issue(n) => format!("issue=#{n}"),
+        WorkKey::Pr(n) => format!("pr=#{n}"),
+    };
+    let line = format!("{ts}\tlakitu-tui\tweb\tcard-acknowledged\t{detail}\n");
     let path = audit_log_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
