@@ -523,6 +523,27 @@ fn build_sections(app: &App) -> Vec<Section> {
 /// divider is 1; a client is a header row plus its box (status + items + open
 /// tasks + 2 borders, or nothing when empty). The single source for both the
 /// pane-size estimate (in `render`) and the scroll math (in `render_agents_pane`).
+/// When an issue work-item has an OPEN PR folded onto it, the PR number to
+/// surface as its own child row (Option A). `None` for PR-only items (already
+/// their own row) and for merged/closed/done work. The single source of truth
+/// shared by the height estimator (`section_height`) and the renderer, so they
+/// can never disagree about whether the row exists.
+fn open_pr_child(app: &App, w: &WorkItem) -> Option<u64> {
+    match w.pr {
+        Some(prn)
+            if w.issue.is_some()
+                && !matches!(
+                    w.state,
+                    crate::work::WorkState::Done | crate::work::WorkState::Merged
+                )
+                && !is_meta_done(app, w) =>
+        {
+            Some(prn)
+        }
+        _ => None,
+    }
+}
+
 fn section_height(app: &App, section: &Section, box_inner_w: u16) -> u16 {
     match section {
         Section::ProjectHeader(_) => 1,
@@ -542,6 +563,12 @@ fn section_height(app: &App, section: &Section, box_inner_w: u16) -> u16 {
             };
             let folded = app.collapsed.contains(&g.key);
             let item_rows = if folded { 0 } else { g.items.len() as u16 };
+            // Each open-PR work-item also gets a "↳ PR #N" child row.
+            let pr_rows = if folded {
+                0
+            } else {
+                g.items.iter().filter_map(|w| open_pr_child(app, w)).count() as u16
+            };
             let task_lines = match g.client {
                 Some(i)
                     if !folded
@@ -554,7 +581,7 @@ fn section_height(app: &App, section: &Section, box_inner_w: u16) -> u16 {
                 }
                 _ => 0,
             };
-            let content = status_lines + item_rows + task_lines;
+            let content = status_lines + item_rows + pr_rows + task_lines;
             let box_h = if content > 0 { content + 2 } else { 0 };
             1 + box_h
         }
@@ -821,8 +848,18 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
             .unwrap_or_default();
 
         let item_rows = if collapsed { 0 } else { group.items.len() };
+        // Each open-PR work-item also renders a "↳ PR #N" child row (Option A).
+        let pr_rows = if collapsed {
+            0
+        } else {
+            group
+                .items
+                .iter()
+                .filter_map(|w| open_pr_child(app, w))
+                .count()
+        };
         // One clipped line per open task (full text lives in the modal).
-        let content = status_lines.len() + item_rows + open_tasks.len();
+        let content = status_lines.len() + item_rows + pr_rows + open_tasks.len();
         if content == 0 {
             continue;
         }
@@ -923,9 +960,62 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
                 });
                 row_ys.push(iy);
                 off += 1;
-                // PR-linked tasks render as nested children beneath their item
-                // — the "subtree under the PR" view. Long text wraps. Each task
-                // is one selectable tree row (its wrapped lines share the cursor).
+
+                // Surface an OPEN PR as its own spottable child row beneath the
+                // issue work-item — otherwise the PR is only the "PR #N" column
+                // and easy to miss. Clickable / Enter opens it, and the PR's
+                // tasks nest one level deeper, under this row. Only for PRs
+                // folded under an issue: a PR-only item is already its own row.
+                let pr_row = open_pr_child(app, w);
+                let mut pr_shown = false;
+                if let Some(prn) = pr_row {
+                    if off < box_inner.height {
+                        let pry = box_inner.y + off;
+                        let arrow = "  ↳ ";
+                        let label = format!("PR #{prn}");
+                        let label_col = arrow.chars().count() as u16;
+                        let label_w = label.chars().count() as u16;
+                        let spans = vec![
+                            Span::styled(arrow, Style::default().fg(SECONDARY_FG)),
+                            Span::styled(label, normal_ref_style()),
+                            Span::styled(
+                                format!(" · {}", w.state.label()),
+                                Style::default().fg(SECONDARY_FG),
+                            ),
+                        ];
+                        let mut st = Style::default();
+                        if focused && rows.len() == selected {
+                            st = st.add_modifier(Modifier::REVERSED);
+                        }
+                        Paragraph::new(Line::from(spans)).style(st).render(
+                            Rect {
+                                x: box_inner.x,
+                                y: pry,
+                                width: box_inner.width,
+                                height: 1,
+                            },
+                            &mut cbuf,
+                        );
+                        click_local.push((
+                            pry,
+                            box_inner.x + label_col,
+                            box_inner.x + label_col + label_w,
+                            RefKind::Pr.url(&w.repo, prn),
+                        ));
+                        rows.push(TreeRow::Pr {
+                            repo: w.repo.clone(),
+                            number: prn,
+                        });
+                        row_ys.push(pry);
+                        off += 1;
+                        pr_shown = true;
+                    }
+                }
+
+                // PR-linked tasks render as nested children — under the PR row
+                // when it's shown (depth 2), else directly under the work-item
+                // (depth 1). Each task is one selectable tree row.
+                let task_depth: u8 = if pr_shown { 2 } else { 1 };
                 for t in open_tasks.iter().filter(|t| task_on_item(t, w)) {
                     if off >= box_inner.height {
                         break;
@@ -942,7 +1032,7 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
                     } else {
                         Style::default()
                     };
-                    Paragraph::new(task_line(t, stale, true, box_inner.width))
+                    Paragraph::new(task_line(t, stale, task_depth, box_inner.width))
                         .style(st)
                         .render(
                             Rect {
@@ -979,7 +1069,7 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
             } else {
                 Style::default()
             };
-            Paragraph::new(task_line(t, stale, false, box_inner.width))
+            Paragraph::new(task_line(t, stale, 0, box_inner.width))
                 .style(st)
                 .render(
                     Rect {
@@ -1285,15 +1375,19 @@ fn pr_repo_matches(task_repo: &str, item_repo: &str) -> bool {
 
 /// One clipped line for a task in the agents pane — the title only, so the
 /// dashboard stays compact (the full title + body live in the tasks modal).
-/// `child` nests it under its PR's work-item row (`  ↳ ☐ …`); otherwise a flat
-/// checklist line (`☐ …`). A long title is clipped with an ellipsis.
-fn task_line(t: &crate::store::Task, stale: bool, child: bool, max_w: u16) -> Line<'static> {
+/// `depth` sets the nesting: 0 = flat checklist (`☐ …`), 1 = under a work-item
+/// (`  ↳ ☐ …`), 2 = under a PR child row (`    ↳ ☐ …`). Long titles clip.
+fn task_line(t: &crate::store::Task, stale: bool, depth: u8, max_w: u16) -> Line<'static> {
     let (box_style, text_style) = task_styles(stale);
-    let text_col: usize = if child { 6 } else { 2 }; // "  ↳ ☐ " | "☐ "
+    let indent = depth as usize * 2; // 2 spaces per level, before the "↳ ☐ "
+    let text_col: usize = if depth > 0 { indent + 4 } else { 2 }; // "↳ ☐ " is 4 cols
     let usable = (max_w as usize).saturating_sub(text_col).max(1);
     let mut spans: Vec<Span> = Vec::new();
-    if child {
-        spans.push(Span::styled("  ↳ ", Style::default().fg(SECONDARY_FG)));
+    if depth > 0 {
+        spans.push(Span::styled(
+            format!("{}↳ ", " ".repeat(indent)),
+            Style::default().fg(SECONDARY_FG),
+        ));
     }
     spans.push(Span::styled("☐ ", box_style));
     spans.push(Span::styled(clip(&t.text, usable), text_style));
@@ -4109,6 +4203,32 @@ mod tests {
     }
 
     #[test]
+    fn open_pr_gets_its_own_child_row() {
+        let mut app = app_with_one_agent();
+        // A PR opened against an issue folds onto the issue work-item — and
+        // should also surface as its own spottable, selectable child row.
+        app.work.ingest(
+            &crate::event::Event::from_log_line(
+                "2026-05-29T15:00:00+02:00\tboard-issue-loop\tweb\tpr-opened\tissue=#187 pr=#188",
+            )
+            .unwrap(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        assert!(
+            screen(&terminal).contains("↳ PR #188"),
+            "an open PR renders as a spottable child row"
+        );
+        assert!(
+            app.tree_rows
+                .iter()
+                .any(|r| matches!(r, TreeRow::Pr { number: 188, .. })),
+            "the PR child row is a selectable TreeRow::Pr(188)"
+        );
+    }
+
+    #[test]
     fn clients_pane_hover_highlights_the_link_under_the_cursor() {
         // Regression: the pane renders into an off-screen buffer at *content*
         // coordinates, so a link's hover highlight must be resolved against the
@@ -4371,7 +4491,7 @@ mod tests {
             from_msg: None,
         };
         // The pane shows one clipped line (full text lives in the modal detail).
-        let line = task_line(&t, false, false, 20);
+        let line = task_line(&t, false, 0, 20);
         let w: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
         assert!(w <= 20, "clipped to the box width, got {w}");
         assert!(

@@ -231,6 +231,10 @@ pub enum TreeRow {
         /// be dismissed from the view with `x`.
         finished: bool,
     },
+    /// An open PR surfaced as its own child row beneath its issue work-item, so
+    /// a PR is spottable on its own (it otherwise only shows as the "PR #N"
+    /// column). Enter / click opens the PR; PR-linked tasks nest beneath it.
+    Pr { repo: String, number: u64 },
     /// A task under a client (or under you). Enter opens the tasks modal at it;
     /// `c` composes a message about it (to that client, or pick a recipient for
     /// your own). `owner` is whose list it's on; `text` is its title.
@@ -1919,6 +1923,9 @@ fn handle_input(app: &mut App, ev: CtEvent) -> InputResult {
                         if let Some(u) = url {
                             let _ = webbrowser::open(&u);
                         }
+                    }
+                    Some(TreeRow::Pr { repo, number }) => {
+                        let _ = webbrowser::open(&RefKind::Pr.url(&repo, number));
                     }
                     Some(TreeRow::Task { owner, id, .. }) => {
                         // Open the tasks modal for the owner, with this task selected.
