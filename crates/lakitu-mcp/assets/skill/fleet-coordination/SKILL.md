@@ -27,7 +27,7 @@ This is **optional plumbing**: if `lakitu-mcp` isn't connected (`/mcp` to check)
 - `mcp__lakitu-mcp__read_tasks(name, include_done?)` — read your open tasks (`include_done=true` for completed ones too).
 - `mcp__lakitu-mcp__complete_task(name, id)` / `mcp__lakitu-mcp__drop_task(name, id)` — finish (keep as done) or remove a task by id.
 
-**Keep messages compact — but still friendly.** Each one costs tokens for everyone who reads it, so be brief *and* warm: lead with the ask or the outcome, and a quick friendly line is welcome. What wastes tokens is the padding — long preambles, restating context the recipient already has, formal sign-offs — not basic courtesy. Aim for a title plus a sentence or two. Applies to `send_message`, `broadcast`, and `notify_supervisor`.
+**Keep messages compact — but still friendly.** Each one costs tokens for everyone who reads it, so be brief *and* warm: lead with the ask or the outcome, and a quick friendly line is welcome. What wastes tokens is the padding — long preambles, restating context the recipient already has, formal sign-offs — not basic courtesy. Aim for a title plus a sentence or two. When a message *does* run longer, **structure it for scanning** — one point per line or short bullets, never a run-on paragraph (a wall of text is hard to read, especially mirrored into Slack); compact means no padding, not no line breaks. Applies to `send_message`, `broadcast`, and `notify_supervisor`.
 
 ## Your name and role
 
