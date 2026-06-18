@@ -63,10 +63,34 @@ pub async fn serve() -> Result<()> {
         },
     );
 
-    let app = Router::new()
+    // Bearer-gated surface: MCP-over-HTTP (`/mcp`) + the `/v1` REST API. Every
+    // request here must present `Authorization: Bearer $LAKITU_FLEET_TOKEN`.
+    let gated = Router::new()
         .nest_service("/mcp", mcp)
         .merge(crate::rest::router())
         .layer(middleware::from_fn_with_state(token, bearer_auth));
+
+    // The read-only web cockpit (`/`) renders `fleet::snapshot()` in-process, so
+    // the browser carries no token — which means it must never be reachable
+    // off-box. We therefore mount it OUTSIDE the bearer layer, and ONLY on a
+    // loopback bind; on any non-loopback bind it stays disabled (front it with a
+    // TLS-terminating proxy, or use the TUI). Keep this guard if you add web
+    // routes — it is the entire basis for skipping auth there.
+    let loopback = listen
+        .parse::<std::net::SocketAddr>()
+        .map(|a| a.ip().is_loopback())
+        .unwrap_or(false);
+    let app = if loopback {
+        tracing::info!("web cockpit at / (loopback, read-only, unauthenticated mirror)");
+        gated.merge(crate::web::router())
+    } else {
+        tracing::warn!(
+            %listen,
+            "web cockpit DISABLED on non-loopback bind (its `/` mirror is unauthenticated); \
+             front it with a TLS proxy or use the TUI"
+        );
+        gated
+    };
 
     let listener = tokio::net::TcpListener::bind(&listen)
         .await
