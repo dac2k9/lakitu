@@ -20,7 +20,10 @@ use axum::{
 };
 use maud::{DOCTYPE, Markup, html};
 
-use crate::wire::{AgentDto, MessageDto, ProjectDto, SnapshotDto, TaskDto, UsageDto};
+use crate::wire::{
+    AgentDto, MessageDto, ProjectDto, SharedTaskDto, SnapshotDto, TaskDto, TaskEventDto,
+    TaskRefDto, UsageDto,
+};
 
 /// The web routes, rooted at `/`. Mounted OUTSIDE the bearer-auth layer — the
 /// caller (`daemon.rs`) must guarantee a loopback bind before merging this.
@@ -203,17 +206,231 @@ fn asset(ct: &'static str, body: &'static str) -> impl IntoResponse {
 
 // ---- Templates -------------------------------------------------------------
 
-/// The "tasks" tab — a placeholder until the full tasks view lands. Static (no
-/// self-poll); switching to Fleet swaps `#view` back to the live board.
-fn tasks_fragment(_snap: &SnapshotDto) -> Markup {
+/// The "tasks" tab — a fleet-wide view of every shared task: a card per
+/// `SharedTask` with its scope, participants, linked issues/PRs, and a
+/// Start→Goal timeline. Live like the Fleet board (self-polls `#view`) so a
+/// reconcile pass that advances a task surfaces without a manual refresh — but
+/// at a calmer 5s, since shared tasks move on GitHub-sync cadence, not the
+/// second-by-second pulse of agent state.
+fn tasks_fragment(snap: &SnapshotDto) -> Markup {
+    // Urgency-sort: what needs attention first, finished last; ties broken by
+    // most-recently-updated (RFC3339 sorts chronologically as plain strings).
+    let mut tasks: Vec<&SharedTaskDto> = snap.shared_tasks.iter().collect();
+    tasks.sort_by(|a, b| {
+        task_urgency(&a.state)
+            .cmp(&task_urgency(&b.state))
+            .then_with(|| b.updated.cmp(&a.updated))
+    });
+    let count = |s: &str| tasks.iter().filter(|t| t.state == s).count();
+
     html! {
-        main id="view" class="live" {
-            div class="coming-soon" {
-                div class="cs-glyph" { "◷" }
-                div class="cs-title" { "Tasks" }
-                div class="cs-sub" { "Coming soon — a fleet-wide view of every client's tasks." }
+        main id="view" class="live tasks" hx-get="/partial/view/tasks" hx-trigger="every 5s" hx-swap="outerHTML" {
+            section class="telemetry" {
+                div class="vitals" {
+                    (vital("shared", tasks.len(), "v-on"))
+                    (vital("active", count("active"), "v-work"))
+                    (vital("in review", count("in-review"), "v-rev"))
+                    (vital("blocked", count("blocked"), "v-block"))
+                    (vital("done", count("done"), "v-done"))
+                }
+            }
+
+            @if tasks.is_empty() {
+                div class="coming-soon" {
+                    div class="cs-glyph" { "◷" }
+                    div class="cs-title" { "No shared tasks yet" }
+                    div class="cs-sub" {
+                        "A shared task groups issues + PRs across the fleet toward one goal. "
+                        "Create one with " code { "create_shared_task" }
+                        " — it self-populates and self-advances as PRs land on GitHub."
+                    }
+                }
+            } @else {
+                div class="tgrid" {
+                    @for t in &tasks { (shared_task_card(t, snap)) }
+                }
             }
         }
+    }
+}
+
+/// One shared-task card: head (state glyph · title · scope · state) over the
+/// goal, participants, linked issues/PRs, and the Start→Goal timeline.
+fn shared_task_card(t: &SharedTaskDto, snap: &SnapshotDto) -> Markup {
+    let cls = task_state_cls(&t.state);
+    let active = t.state == "active";
+    let card_cls = format!(
+        "tcard{}",
+        if t.state == "blocked" { " blocked" } else { "" }
+    );
+    let linked = t.issues.len() + t.prs.len();
+
+    html! {
+        article class=(card_cls) {
+            div class="tcard-head" {
+                span class=(format!("glyph {cls}")) data-spin[active] { (task_state_glyph(&t.state)) }
+                div class="id" {
+                    span class="name" { (t.title) }
+                    span class="role" { (scope_label(t)) }
+                }
+                span class=(format!("state-label {cls}")) { (t.state) }
+            }
+
+            @if let Some(goal) = &t.goal {
+                div class=(format!("now {cls}")) { span class="now-text" { "→ " (goal) } }
+            }
+
+            @if !t.participants.is_empty() {
+                div class="prow" {
+                    @for p in &t.participants { (participant_chip(p, snap)) }
+                }
+            }
+
+            @if linked > 0 {
+                div class="refs" {
+                    @for i in &t.issues { (ref_pill(i, "issue")) }
+                    @for p in &t.prs { (ref_pill(p, "pr")) }
+                }
+            }
+
+            @if !t.timeline.is_empty() { (timeline_strip(&t.timeline)) }
+
+            div class="meta" {
+                span { (linked) " linked" }
+                span class="dot-sep" { "·" }
+                span {
+                    (t.participants.len())
+                    @if t.participants.len() == 1 { " participant" } @else { " participants" }
+                }
+                span class="dot-sep" { "·" }
+                span { "updated " (short_time(&t.updated)) }
+            }
+        }
+    }
+}
+
+/// A participant chip. Per the reconcile contract, `participants[]` mixes fleet
+/// agent names (the owner + anyone who ran `join_shared_task`) with GitHub
+/// logins (a closing PR's author, auto-credited by the sweep). Distinguish
+/// them: a name that matches the roster renders as an agent chip with its live
+/// state glyph; anything else is a plain `@github-login` chip.
+fn participant_chip(p: &str, snap: &SnapshotDto) -> Markup {
+    match snap.agents.iter().find(|a| a.name == *p) {
+        Some(a) => {
+            let cls = color_cls(a);
+            html! {
+                span class="pchip agent" title=(format!("{p} · fleet agent")) {
+                    span class=(format!("pglyph {cls}")) { (glyph_for(a)) }
+                    (p)
+                }
+            }
+        }
+        None => html! {
+            span class="pchip gh" title="GitHub contributor — auto-credited from a closing PR" {
+                "@" (p)
+            }
+        },
+    }
+}
+
+/// A linked issue or PR, as a pill that opens the item on GitHub. `kind` picks
+/// the path segment (`pull` vs `issues`), the type emoji, and the title word.
+/// The ref's cached `state` (reconcile-populated, snapshot-only — no live gh)
+/// drives a trailing status dot + a border tint; `None` (not yet reconciled)
+/// falls back to type-only, so an un-synced ref still renders cleanly.
+fn ref_pill(r: &TaskRefDto, kind: &str) -> Markup {
+    let short = r.repo.rsplit('/').next().unwrap_or(&r.repo);
+    let (seg, emoji, word) = if kind == "pr" {
+        ("pull", "🔀", "PR")
+    } else {
+        ("issues", "🔘", "issue")
+    };
+    let href = format!("https://github.com/{}/{}/{}", r.repo, seg, r.number);
+    let state_cls = r.state.as_deref().map(ref_state_cls).unwrap_or("");
+    let title = match &r.state {
+        Some(s) => format!("{word} {}#{} · {s} — open on GitHub", r.repo, r.number),
+        None => format!("{word} {}#{} — open on GitHub", r.repo, r.number),
+    };
+    html! {
+        a class=(format!("pill {kind} {state_cls}")) href=(href) target="_blank" rel="noopener noreferrer"
+            title=(title) {
+            span class="pill-mark" { (emoji) }
+            (short) "#" (r.number)
+            @if let Some(s) = &r.state {
+                @let dot = ref_state_dot(s);
+                @if !dot.is_empty() { span class="pill-state" { (dot) } }
+            }
+        }
+    }
+}
+
+/// The status dot for a linked ref's cached GitHub state: 🟢 open · ⚪ draft ·
+/// 🟣 merged · 🔴 closed. Unknown ⇒ empty (no dot).
+fn ref_state_dot(state: &str) -> &'static str {
+    match state {
+        "open" => "🟢",
+        "draft" => "⚪",
+        "merged" => "🟣",
+        "closed" => "🔴",
+        _ => "",
+    }
+}
+
+/// A border-tint class for a linked ref's state — a quieter scannability cue
+/// alongside the dot.
+fn ref_state_cls(state: &str) -> &'static str {
+    match state {
+        "open" => "s-open",
+        "draft" => "s-draft",
+        "merged" => "s-merged",
+        "closed" => "s-closed",
+        _ => "",
+    }
+}
+
+/// The Start→Goal timeline: append-only state transitions, oldest→newest, the
+/// current state emphasized. Each step's tooltip carries who moved it, when, and
+/// the optional "why" note (`reconcile` marks an auto-sync move); the latest
+/// note is surfaced inline below as the current "why". Scrolls if it overflows.
+fn timeline_strip(events: &[TaskEventDto]) -> Markup {
+    let last = events.len().saturating_sub(1);
+    html! {
+        div class="tl-wrap" {
+            div class="tl" {
+                @for (i, e) in events.iter().enumerate() {
+                    @if i > 0 { span class="tl-arrow" { "→" } }
+                    span class=(format!("tl-step {}{}", task_state_cls(&e.state), if i == last { " cur" } else { "" }))
+                        title=(event_title(e)) {
+                        (e.state)
+                    }
+                }
+            }
+        }
+        @if let Some(note) = events.last().and_then(|e| e.note.as_deref()) {
+            div class="tl-note" { "↳ " (note) }
+        }
+    }
+}
+
+/// Tooltip for a timeline step: `state · by who · when`, with the "why" note
+/// appended when present.
+fn event_title(e: &TaskEventDto) -> String {
+    let base = format!("{} · by {} · {}", e.state, e.by, short_time(&e.ts));
+    match &e.note {
+        Some(n) => format!("{base} — {n}"),
+        None => base,
+    }
+}
+
+/// A human label for a task's scope: `fleet-wide`, or `team · <owner/projNo>`.
+fn scope_label(t: &SharedTaskDto) -> String {
+    match t.scope.as_str() {
+        "fleet" => "fleet-wide".to_string(),
+        "team" => match &t.team {
+            Some(team) => format!("team · {team}"),
+            None => "team".to_string(),
+        },
+        other => other.to_string(),
     }
 }
 
@@ -545,6 +762,45 @@ fn urgency(a: &AgentDto) -> u8 {
         "waiting" => 2,
         "idle" => 3,
         _ => 4,
+    }
+}
+
+/// Urgency for the shared-task sort: blocked → in-review → active → open → done.
+fn task_urgency(s: &str) -> u8 {
+    match s {
+        "blocked" => 0,
+        "in-review" => 1,
+        "active" => 2,
+        "open" => 3,
+        "done" => 4,
+        _ => 5,
+    }
+}
+
+/// The colour class for a shared-task state (`ts-*`), distinct from the agent
+/// `st-*` classes: open=idle, active=live, blocked=focus, in-review=hold,
+/// done=faint.
+fn task_state_cls(s: &str) -> &'static str {
+    match s {
+        "open" => "ts-open",
+        "active" => "ts-active",
+        "blocked" => "ts-blocked",
+        "in-review" => "ts-review",
+        "done" => "ts-done",
+        _ => "ts-unknown",
+    }
+}
+
+/// The glyph for a shared-task state: `○` open, `⠋` active (spins), `⚠` blocked,
+/// `◑` in-review, `✓` done.
+fn task_state_glyph(s: &str) -> &'static str {
+    match s {
+        "open" => "○",
+        "active" => "⠋",
+        "blocked" => "⚠",
+        "in-review" => "◑",
+        "done" => "✓",
+        _ => "·",
     }
 }
 

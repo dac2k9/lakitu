@@ -253,7 +253,7 @@ body::after {
 @media (max-width: 560px) {
   .viewfinder { inset: 8px; }
   .live { padding: 16px; }
-  .agents { grid-template-columns: 1fr; }
+  .agents, .tgrid { grid-template-columns: 1fr; }
   .you { margin-left: 0; }
   .brand-sub { display: none; }
 }
@@ -323,8 +323,86 @@ html { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--haze) 38
 ::-webkit-scrollbar-thumb:hover { background: var(--haze); background-clip: padding-box; }
 ::-webkit-scrollbar-corner { background: transparent; }
 
-/* ---- tab placeholder (coming soon) ---- */
+/* ---- tab placeholder / empty state (coming soon) ---- */
 .coming-soon { max-width: 560px; margin: 64px auto; padding: 48px 28px; text-align: center; border: 1px dashed var(--edge); border-radius: 14px; background: color-mix(in srgb, var(--void) 88%, #000); }
 .cs-glyph { font-family: var(--mono); font-size: 2rem; color: var(--faint); }
 .cs-title { font-family: var(--mono); font-weight: 700; letter-spacing: 0.22em; text-transform: uppercase; margin: 12px 0 6px; color: var(--cloud); }
 .cs-sub { color: var(--haze); font-size: 0.9rem; }
+
+/* ---- shared-tasks view (the Tasks tab) ---- */
+.v-rev .vital-n { color: var(--hold); }
+.v-done .vital-n { color: var(--faint); }
+
+.tgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; }
+.tcard {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--edge); border-radius: 12px;
+  background: linear-gradient(180deg, var(--panel), color-mix(in srgb, var(--panel) 84%, #000));
+  transition: border-color 0.18s ease, transform 0.18s ease;
+}
+.tcard:hover { border-color: #34507a; transform: translateY(-1px); }
+.tcard.blocked { border-color: color-mix(in srgb, var(--focus) 55%, var(--edge)); animation: pulse 2.2s ease-in-out infinite; }
+.tcard-head { display: flex; align-items: center; gap: 0.6rem; }
+.tcard-head .id { flex: 1; min-width: 0; }
+.tcard-head .name { white-space: normal; }  /* task titles wrap, unlike agent names */
+
+/* task-state colours — the ts-* set, distinct from the agent st-* set */
+.ts-open    { color: var(--idle); }
+.ts-active  { color: var(--live); }
+.ts-blocked { color: var(--focus); }
+.ts-review  { color: var(--hold); }
+.ts-done    { color: var(--faint); }
+.ts-unknown { color: var(--haze); }
+.now.ts-open { color: var(--idle); }
+.now.ts-active { color: var(--live); }
+.now.ts-blocked { color: var(--focus); }
+.now.ts-review { color: var(--hold); }
+.now.ts-done { color: var(--faint); }
+.state-label.ts-open { color: var(--idle); }
+.state-label.ts-active { color: var(--live); }
+.state-label.ts-blocked { color: var(--focus); }
+.state-label.ts-review { color: var(--hold); }
+.state-label.ts-done { color: var(--faint); }
+
+/* participants — agent chip (live glyph) vs GitHub-login chip (dashed, "gh") */
+.prow { display: flex; flex-wrap: wrap; gap: 6px; }
+.pchip {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  font-family: var(--mono); font-size: 0.74rem;
+  padding: 2px 9px; border-radius: 999px;
+  border: 1px solid var(--edge); background: var(--panel-2); color: var(--cloud);
+}
+.pchip .pglyph { font-family: var(--mono); font-size: 0.85rem; }
+.pchip.gh { color: var(--haze); background: transparent; border-style: dashed; }
+.pchip.gh::before {
+  content: "gh"; font-size: 0.58rem; font-weight: 700; letter-spacing: 0.05em;
+  text-transform: uppercase; color: var(--faint);
+}
+
+/* linked issues + PRs — pills that open the item on GitHub */
+.refs { display: flex; flex-wrap: wrap; gap: 6px; }
+.pill {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  font-family: var(--mono); font-size: 0.74rem; text-decoration: none;
+  padding: 2px 9px; border-radius: 7px;
+  border: 1px solid var(--edge); background: var(--void); color: var(--haze);
+}
+.pill:hover { border-color: #34507a; color: var(--cloud); }
+.pill-mark { font-size: 0.8rem; line-height: 1; }
+.pill-state { font-size: 0.72rem; line-height: 1; margin-left: 0.05rem; }
+/* state tint — a quiet border cue alongside the status dot (draft = default) */
+.pill.s-open   { border-color: color-mix(in srgb, var(--live) 42%, var(--edge)); }
+.pill.s-merged { border-color: color-mix(in srgb, #a371f7 48%, var(--edge)); }
+.pill.s-closed { border-color: color-mix(in srgb, var(--focus) 42%, var(--edge)); }
+
+/* Start→Goal timeline */
+.tl-wrap { overflow-x: auto; padding-bottom: 2px; }
+.tl { display: flex; align-items: center; gap: 0.4rem; width: max-content; }
+.tl-arrow { color: var(--faint); font-family: var(--mono); }
+.tl-step {
+  font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.04em; white-space: nowrap;
+  padding: 2px 8px; border-radius: 99px; border: 1px solid currentColor; opacity: 0.55;
+}
+.tl-step.cur { opacity: 1; font-weight: 700; box-shadow: inset 0 0 0 1px currentColor; }
+.tl-note { margin-top: 6px; font-family: var(--mono); font-size: 0.7rem; color: var(--haze); }
