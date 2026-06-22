@@ -1231,6 +1231,35 @@ pub async fn advance_shared_task(id: &str, state: SharedTaskState, by: &str) -> 
     Ok(st)
 }
 
+/// Reconcile a shared task's state from PR signals — atomically. Reads the
+/// CURRENT state and applies [`SharedTaskState::reconciled_to`] to *that* state,
+/// then writes, so a manual `done`/`blocked` set after a sweep sampled its gh
+/// signals can't be clobbered (the decision and the write share one read). The
+/// move is stamped `by = "reconcile"`. Returns the new state if it advanced.
+pub async fn reconcile_advance(
+    id: &str,
+    has_open_pr: bool,
+    has_merged_pr: bool,
+) -> Result<Option<SharedTaskState>> {
+    let mut st = match read_shared_task(id).await {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    let Some(next) = st.state.reconciled_to(has_open_pr, has_merged_pr) else {
+        return Ok(None);
+    };
+    let now = now_iso();
+    st.state = next;
+    st.timeline.push(TaskEvent {
+        state: next,
+        ts: now.clone(),
+        by: "reconcile".to_string(),
+    });
+    st.updated = now;
+    write_shared_task(&st).await?;
+    Ok(Some(next))
+}
+
 /// List all registered agents with current presence + unread count.
 pub async fn list_agents() -> Result<Vec<AgentSummary>> {
     let agents_dir = store_root().join("agents");
@@ -2033,5 +2062,48 @@ mod tests {
         assert!(!is_repo_slug("/lakitu"), "empty owner");
         assert!(!is_repo_slug("dac2k9/"), "empty name");
         assert!(!is_repo_slug(""));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // _env guard intentionally held across .await
+    async fn reconcile_advance_applies_policy_atomically() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("fleet-reconcile-adv-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: TEST_ENV_LOCK serializes the HOME-mutating tests.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("LAKITU_FLEET_ROOT");
+            std::env::remove_var("GENBOT_ROOT");
+        }
+
+        let st = create_shared_task("lakitu", "Reconcile me", None, TaskScope::Fleet, None)
+            .await
+            .unwrap();
+
+        // A merged-PR signal advances open -> in-review, stamped by "reconcile".
+        let moved = reconcile_advance(&st.id, false, true).await.unwrap();
+        assert_eq!(moved, Some(SharedTaskState::InReview));
+        let got = read_shared_task(&st.id).await.unwrap();
+        assert_eq!(got.state, SharedTaskState::InReview);
+        assert_eq!(got.timeline.last().unwrap().by, "reconcile");
+
+        // Idempotent: the same signal again => no change.
+        assert_eq!(reconcile_advance(&st.id, false, true).await.unwrap(), None);
+
+        // No-override: a human Done is never clobbered by a later reconcile.
+        advance_shared_task(&st.id, SharedTaskState::Done, "dac")
+            .await
+            .unwrap();
+        assert_eq!(reconcile_advance(&st.id, true, true).await.unwrap(), None);
+        assert_eq!(
+            read_shared_task(&st.id).await.unwrap().state,
+            SharedTaskState::Done,
+            "reconcile must not regress a human Done"
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

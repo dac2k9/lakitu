@@ -1684,10 +1684,10 @@ impl AgentBoardService {
                 if issue.repo.split_once('/').is_none() {
                     continue; // malformed ref — skip so one bad ref can't abort the pass
                 }
-                for (pr, author) in issue_closing_prs(&issue.repo, issue.number).await {
-                    let key = (issue.repo.clone(), pr);
+                for (pr_repo, pr, author) in issue_closing_prs(&issue.repo, issue.number).await {
+                    let key = (pr_repo.clone(), pr);
                     if !linked.contains(&key)
-                        && fleet::link_shared_task(&t.id, fleet::RefKind::Pr, &issue.repo, pr)
+                        && fleet::link_shared_task(&t.id, fleet::RefKind::Pr, &pr_repo, pr)
                             .await
                             .is_ok()
                     {
@@ -1713,23 +1713,9 @@ impl AgentBoardService {
                     Ok(PrState::Closed) | Err(_) => {}
                 }
             }
-            let current = match fleet::read_shared_task(&t.id).await {
-                Some(s) => s.state,
-                None => continue,
-            };
-            if let Some(next) = current.reconciled_to(has_open, has_merged) {
-                if fleet::advance_shared_task(&t.id, next, "reconcile")
-                    .await
-                    .is_ok()
-                {
-                    out.push_str(&format!(
-                        "  {}: {} -> {}\n",
-                        t.id,
-                        current.as_str(),
-                        next.as_str()
-                    ));
-                    advanced += 1;
-                }
+            if let Ok(Some(next)) = fleet::reconcile_advance(&t.id, has_open, has_merged).await {
+                out.push_str(&format!("  {}: -> {}\n", t.id, next.as_str()));
+                advanced += 1;
             }
             if new_links > 0 || new_parts > 0 {
                 out.push_str(&format!(
@@ -2551,14 +2537,14 @@ async fn pr_state(number: u64, repo_slug: &str) -> Result<PrState, McpError> {
 /// body-parsing. Each entry is `(pr_number, author_login)`. A malformed slug, a
 /// gh error, or unexpected JSON yields an empty list, so one bad ref can never
 /// abort the whole reconcile pass.
-async fn issue_closing_prs(repo_slug: &str, issue: u64) -> Vec<(u64, String)> {
+async fn issue_closing_prs(repo_slug: &str, issue: u64) -> Vec<(String, u64, String)> {
     let Some((owner, name)) = repo_slug.split_once('/') else {
         return Vec::new();
     };
     if owner.is_empty() || name.is_empty() {
         return Vec::new();
     }
-    const QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){closedByPullRequestsReferences(first:20,includeClosedPrs:true){nodes{number author{login}}}}}}";
+    const QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){closedByPullRequestsReferences(first:20,includeClosedPrs:true){nodes{number repository{nameWithOwner} author{login}}}}}}";
     let q = format!("query={QUERY}");
     let o = format!("owner={owner}");
     let nm = format!("name={name}");
@@ -2578,8 +2564,9 @@ async fn issue_closing_prs(repo_slug: &str, issue: u64) -> Vec<(u64, String)> {
     arr.iter()
         .filter_map(|n| {
             let number = n["number"].as_u64()?;
+            let repo = n["repository"]["nameWithOwner"].as_str()?.to_string();
             let author = n["author"]["login"].as_str().unwrap_or("").to_string();
-            Some((number, author))
+            Some((repo, number, author))
         })
         .collect()
 }
