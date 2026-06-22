@@ -27,7 +27,7 @@ use crate::wire::{AgentDto, MessageDto, ProjectDto, SnapshotDto, TaskDto, UsageD
 pub fn router() -> Router {
     Router::new()
         .route("/", get(index))
-        .route("/partial/board", get(board_partial))
+        .route("/partial/view/{tab}", get(view_partial))
         .route("/partial/inbox/{name}", get(inbox_partial))
         .route("/assets/app.css", get(css))
         .route("/assets/app.js", get(js))
@@ -76,9 +76,15 @@ async fn index() -> Html<String> {
     Html(page(&crate::fleet::snapshot().await).into_string())
 }
 
-/// The htmx-polled fragment — just the live region.
-async fn board_partial() -> Html<String> {
-    Html(live(&crate::fleet::snapshot().await).into_string())
+/// The htmx-polled fragment for a tab's view (`fleet`, `tasks`, …) — swaps and
+/// self-polls the `#view` region.
+async fn view_partial(Path(tab): Path<String>) -> Html<String> {
+    let snap = crate::fleet::snapshot().await;
+    let view = match tab.as_str() {
+        "tasks" => tasks_fragment(&snap),
+        _ => live(&snap),
+    };
+    Html(view.into_string())
 }
 
 /// An agent's inbox thread, rendered into the drawer (read-only).
@@ -90,6 +96,17 @@ fn inbox_drawer(name: &str, snap: &SnapshotDto) -> Markup {
     let msgs = snap.inboxes.get(name);
     let total = msgs.map_or(0, Vec::len);
     let unread = msgs.map_or(0, |m| m.iter().filter(|x| !x.read).count());
+    let is_supervisor = snap
+        .agents
+        .iter()
+        .any(|a| a.kind == "human" && a.name == name);
+    let mut recipients: Vec<&str> = snap
+        .agents
+        .iter()
+        .filter(|a| a.kind != "human")
+        .map(|a| a.name.as_str())
+        .collect();
+    recipients.sort_unstable();
     html! {
         div class="drawer-backdrop" data-close-drawer="1" {}
         aside class="drawer-panel" {
@@ -101,10 +118,22 @@ fn inbox_drawer(name: &str, snap: &SnapshotDto) -> Markup {
                 button class="drawer-close" data-close-drawer="1" aria-label="close inbox" { "✕" }
             }
             div class="composer" {
-                form data-send-to=(name) {
-                    input class="composer-title" name="title" placeholder="subject" required;
-                    textarea class="composer-body" name="body" placeholder=(format!("message {name}…")) required {}
-                    button type="submit" class="composer-send" { "send" }
+                @if is_supervisor {
+                    form data-msg-form data-inbox=(name) {
+                        select class="composer-to" name="to" required {
+                            option value="" disabled selected { "to…" }
+                            @for r in &recipients { option value=(r) { (r) } }
+                        }
+                        input class="composer-title" name="title" placeholder="subject" required;
+                        textarea class="composer-body" name="body" placeholder="message…" required {}
+                        button type="submit" class="composer-send" { "send" }
+                    }
+                } @else {
+                    form data-msg-form data-inbox=(name) data-send-to=(name) {
+                        input class="composer-title" name="title" placeholder="subject" required;
+                        textarea class="composer-body" name="body" placeholder=(format!("message {name}…")) required {}
+                        button type="submit" class="composer-send" { "send" }
+                    }
                 }
             }
             @if let Some(list) = msgs {
@@ -160,10 +189,33 @@ async fn htmx() -> impl IntoResponse {
     )
 }
 fn asset(ct: &'static str, body: &'static str) -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, ct)], body)
+    // no-store: the cockpit iterates fast and is served locally, so always hand
+    // the browser fresh CSS/JS rather than risk a stale cached stylesheet (e.g.
+    // an old sheet styling a since-changed element).
+    (
+        [
+            (header::CONTENT_TYPE, ct),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
 }
 
 // ---- Templates -------------------------------------------------------------
+
+/// The "tasks" tab — a placeholder until the full tasks view lands. Static (no
+/// self-poll); switching to Fleet swaps `#view` back to the live board.
+fn tasks_fragment(_snap: &SnapshotDto) -> Markup {
+    html! {
+        main id="view" class="live" {
+            div class="coming-soon" {
+                div class="cs-glyph" { "◷" }
+                div class="cs-title" { "Tasks" }
+                div class="cs-sub" { "Coming soon — a fleet-wide view of every client's tasks." }
+            }
+        }
+    }
+}
 
 fn page(snap: &SnapshotDto) -> Markup {
     // The web cockpit acts AS the supervisor. The bearer token is injected into
@@ -193,13 +245,21 @@ fn page(snap: &SnapshotDto) -> Markup {
                     span class="vf tl" {} span class="vf tr" {}
                     span class="vf bl" {} span class="vf br" {}
                 }
-                header class="scope" {
-                    span class="live-tag" { span class="rec" {} "LIVE" }
-                    div class="brand" {
-                        span class="brand-name" { "LAKITU" }
-                        span class="brand-sub" { "fleet lens" }
+                header class="topbar" {
+                    div class="scope" {
+                        span class="live-tag" { span class="rec" {} "LIVE" }
+                        div class="brand" {
+                            span class="brand-name" { "LAKITU" }
+                            span class="brand-sub" { "fleet lens" }
+                        }
+                        div class="clock" id="clock" { "··:··:··" }
                     }
-                    div class="clock" id="clock" { "··:··:··" }
+                    nav class="tabs" {
+                        button class="tab active" data-tab="fleet"
+                            hx-get="/partial/view/fleet" hx-target="#view" hx-swap="outerHTML" { "Fleet" }
+                        button class="tab" data-tab="tasks"
+                            hx-get="/partial/view/tasks" hx-target="#view" hx-swap="outerHTML" { "Tasks" }
+                    }
                 }
                 (live(snap))
                 footer class="foot" {
@@ -260,7 +320,7 @@ fn live(snap: &SnapshotDto) -> Markup {
     unassigned.sort_by_key(|a| (urgency(a), a.name.to_lowercase()));
 
     html! {
-        main id="live" class="live" hx-get="/partial/board" hx-trigger="every 2s" hx-swap="outerHTML" {
+        main id="view" class="live" hx-get="/partial/view/fleet" hx-trigger="every 2s" hx-swap="outerHTML" {
             section class="telemetry" {
                 div class="vitals" {
                     (vital("online", agents.len(), "v-on"))
@@ -270,7 +330,9 @@ fn live(snap: &SnapshotDto) -> Markup {
                     (vital("stale", stale, "v-stale"))
                 }
                 @for h in &humans {
-                    div class="you" title=(format!("{} — supervisor", h.name)) {
+                    button class="you" title="open your inbox"
+                        hx-get=(format!("/partial/inbox/{}", h.name))
+                        hx-target="#drawer" hx-swap="innerHTML" {
                         span class="glyph st-you" { "◆" }
                         span class="you-name" { (h.name) }
                         span class="you-tag" { "you" }

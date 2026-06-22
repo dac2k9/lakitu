@@ -65,15 +65,18 @@
     if (window.htmx) window.htmx.ajax("GET", "/partial/board", { target: "#live", swap: "outerHTML" });
   }
 
-  // Send a message (drawer composer): to = the inbox owner, from = you.
+  // Send a message (drawer composer): recipient from the <select> or
+  // data-send-to, from = you (the supervisor); then reload the open inbox.
   document.addEventListener("submit", function (e) {
-    var form = e.target.closest("[data-send-to]");
+    var form = e.target.closest("[data-msg-form]");
     if (!form) return;
     e.preventDefault();
-    var to = form.getAttribute("data-send-to");
+    var sel = form.querySelector('[name="to"]');
+    var to = sel ? sel.value : form.getAttribute("data-send-to");
     var title = form.querySelector('[name="title"]').value.trim();
     var body = form.querySelector('[name="body"]').value.trim();
-    if (!title || !body) return;
+    if (!to || !title || !body) return;
+    var owner = form.getAttribute("data-inbox");
     var btn = form.querySelector('button[type="submit"]');
     if (btn) {
       btn.disabled = true;
@@ -82,7 +85,7 @@
     api("POST", "/v1/messages", { from: meta("lakitu-me"), to: to, title: title, body: body })
       .then(function (r) {
         if (r.ok) {
-          reloadInbox(to);
+          reloadInbox(owner);
         } else if (btn) {
           btn.disabled = false;
           btn.textContent = "send";
@@ -117,5 +120,14 @@
         b.disabled = false;
         b.textContent = "▢";
       });
+  });
+
+  // 5) Tabs — toggle the active class (htmx swaps #view via the button's hx-get).
+  document.addEventListener("click", function (e) {
+    var tab = e.target.closest(".tab");
+    if (!tab) return;
+    var tabs = tab.parentNode.querySelectorAll(".tab");
+    for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove("active");
+    tab.classList.add("active");
   });
 })();
