@@ -12,7 +12,7 @@
 
 use axum::{
     Router,
-    extract::Request,
+    extract::{Path, Request},
     http::{StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -20,7 +20,7 @@ use axum::{
 };
 use maud::{DOCTYPE, Markup, html};
 
-use crate::wire::{AgentDto, ProjectDto, SnapshotDto, TaskDto, UsageDto};
+use crate::wire::{AgentDto, MessageDto, ProjectDto, SnapshotDto, TaskDto, UsageDto};
 
 /// The web routes, rooted at `/`. Mounted OUTSIDE the bearer-auth layer — the
 /// caller (`daemon.rs`) must guarantee a loopback bind before merging this.
@@ -28,6 +28,7 @@ pub fn router() -> Router {
     Router::new()
         .route("/", get(index))
         .route("/partial/board", get(board_partial))
+        .route("/partial/inbox/{name}", get(inbox_partial))
         .route("/assets/app.css", get(css))
         .route("/assets/app.js", get(js))
         .route("/assets/htmx.min.js", get(htmx))
@@ -80,6 +81,66 @@ async fn board_partial() -> Html<String> {
     Html(live(&crate::fleet::snapshot().await).into_string())
 }
 
+/// An agent's inbox thread, rendered into the drawer (read-only).
+async fn inbox_partial(Path(name): Path<String>) -> Html<String> {
+    Html(inbox_drawer(&name, &crate::fleet::snapshot().await).into_string())
+}
+
+fn inbox_drawer(name: &str, snap: &SnapshotDto) -> Markup {
+    let msgs = snap.inboxes.get(name);
+    let total = msgs.map_or(0, Vec::len);
+    let unread = msgs.map_or(0, |m| m.iter().filter(|x| !x.read).count());
+    html! {
+        div class="drawer-backdrop" data-close-drawer="1" {}
+        aside class="drawer-panel" {
+            div class="drawer-head" {
+                div class="drawer-title-wrap" {
+                    span class="drawer-title" { "✉ " (name) }
+                    span class="drawer-sub" { (unread) " unread · " (total) " total" }
+                }
+                button class="drawer-close" data-close-drawer="1" aria-label="close inbox" { "✕" }
+            }
+            div class="composer" {
+                form data-send-to=(name) {
+                    input class="composer-title" name="title" placeholder="subject" required;
+                    textarea class="composer-body" name="body" placeholder=(format!("message {name}…")) required {}
+                    button type="submit" class="composer-send" { "send" }
+                }
+            }
+            @if let Some(list) = msgs {
+                @if list.is_empty() {
+                    div class="drawer-empty" { "Inbox empty." }
+                } @else {
+                    div class="thread" {
+                        @for m in list { (message_item(m)) }
+                    }
+                }
+            } @else {
+                div class="drawer-empty" { "Inbox empty." }
+            }
+        }
+    }
+}
+
+fn message_item(m: &MessageDto) -> Markup {
+    html! {
+        article class=(if m.read { "msg" } else { "msg unread" }) {
+            div class="msg-head" {
+                span class="msg-from" { (m.from) }
+                @if let Some(t) = &m.time { span class="msg-time" { (short_time(t)) } }
+            }
+            div class="msg-title" { (m.title) }
+            div class="msg-body" { (m.body) }
+        }
+    }
+}
+
+fn short_time(ts: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .map(|t| t.format("%b %d · %H:%M").to_string())
+        .unwrap_or_else(|_| ts.to_string())
+}
+
 async fn css() -> impl IntoResponse {
     asset(
         "text/css; charset=utf-8",
@@ -105,12 +166,23 @@ fn asset(ct: &'static str, body: &'static str) -> impl IntoResponse {
 // ---- Templates -------------------------------------------------------------
 
 fn page(snap: &SnapshotDto) -> Markup {
+    // The web cockpit acts AS the supervisor. The bearer token is injected into
+    // the (loopback-only, host-guarded) page so the browser can call /v1 for
+    // writes — which keeps the web routes themselves GET-only (see daemon.rs).
+    let token = std::env::var("LAKITU_FLEET_TOKEN").unwrap_or_default();
+    let me = snap
+        .agents
+        .iter()
+        .find(|a| a.kind == "human")
+        .map_or("", |a| a.name.as_str());
     html! {
         (DOCTYPE)
         html lang="en" {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
+                meta name="lakitu-token" content=(token);
+                meta name="lakitu-me" content=(me);
                 title { "Lakitu · fleet lens" }
                 link rel="stylesheet" href="/assets/app.css";
                 script src="/assets/htmx.min.js" defer {}
@@ -134,6 +206,7 @@ fn page(snap: &SnapshotDto) -> Markup {
                     "read-only mirror · live feed, refreshes every 2s · "
                     span class="muted" { "writes go through the TUI" }
                 }
+                div id="drawer" {}
             }
         }
     }
@@ -312,7 +385,14 @@ fn agent_card(a: &AgentDto, snap: &SnapshotDto) -> Markup {
                     @if let Some(role) = &a.role { span class="role" { (role) } }
                 }
                 div class="head-right" {
-                    @if a.unread > 0 { span class="badge unread" title="unread messages" { (a.unread) " ✉" } }
+                    button
+                        class=(if a.unread > 0 { "badge unread open-inbox" } else { "badge open-inbox" })
+                        hx-get=(format!("/partial/inbox/{}", a.name))
+                        hx-target="#drawer"
+                        hx-swap="innerHTML"
+                        title="open inbox" {
+                        @if a.unread > 0 { (a.unread) " ✉" } @else { "✉" }
+                    }
                     @if let Some(p) = a.context_pct { (ctx_chip(p)) }
                 }
             }
@@ -340,7 +420,10 @@ fn agent_card(a: &AgentDto, snap: &SnapshotDto) -> Markup {
             @if !open.is_empty() {
                 ul class="tasklist" {
                     @for t in open.iter().take(3) {
-                        li { span class="tbox" { "▢" } span class="ttext" { (t.text) } }
+                        li {
+                            button class="tbox" data-task-done data-owner=(a.name) data-id=(t.id) title="mark done" { "▢" }
+                            span class="ttext" { (t.text) }
+                        }
                     }
                     @if open.len() > 3 {
                         li class="more" { "+ " (open.len() - 3) " more" }
