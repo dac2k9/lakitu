@@ -1047,12 +1047,24 @@ pub async fn list_shared_tasks() -> Vec<SharedTask> {
     out
 }
 
-/// Atomically write a shared task (create or update).
+/// Atomically write a shared task (create or update). The tmp path is unique
+/// per write — shared tasks are multi-writer, so two agents writing the SAME
+/// task must not share a tmp file (their writes would interleave into one torn
+/// file that then gets renamed into place). pid + a per-write id keeps it unique
+/// across processes and within one. The rename is atomic, so a reader sees the
+/// old file or the new one, never a partial write. (The read-modify-write
+/// lost-update — two writers, last wins — is inherent to a lockless file store;
+/// acceptable at this volume, revisit with a per-task lock if one gets hot.)
 async fn write_shared_task(st: &SharedTask) -> Result<()> {
     let dir = shared_tasks_dir();
     fs::create_dir_all(&dir).await?;
     let path = shared_task_path(&st.id);
-    let tmp = path.with_extension("json.tmp");
+    let tmp = dir.join(format!(
+        "{}.{}.{}.tmp",
+        st.id,
+        std::process::id(),
+        short_id(&SHARED_TASK_COUNTER)
+    ));
     fs::write(&tmp, serde_json::to_vec_pretty(st)?).await?;
     fs::rename(&tmp, &path).await?;
     Ok(())
@@ -1898,6 +1910,52 @@ mod tests {
         assert_eq!(rel.prs.len(), 1);
         assert_eq!(rel.participants.len(), 2);
         assert_eq!(rel.timeline.last().unwrap().state, "done");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // _env guard intentionally held across .await
+    async fn shared_task_store_robustness() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("fleet-shared-robust-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: TEST_ENV_LOCK serializes the HOME-mutating tests.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("LAKITU_FLEET_ROOT");
+            std::env::remove_var("GENBOT_ROOT");
+        }
+
+        // A real task to coexist with the bad files below.
+        let st = create_shared_task("lakitu", "Real", None, TaskScope::Fleet, None)
+            .await
+            .unwrap();
+        let dir = store_root().join("tasks").join("shared");
+
+        // Malformed JSON is skipped on read — never crashes list/read.
+        std::fs::write(dir.join("junk.json"), b"{ not valid json").unwrap();
+        assert!(
+            read_shared_task("junk").await.is_none(),
+            "malformed => None"
+        );
+        let all = list_shared_tasks().await;
+        assert_eq!(all.len(), 1, "malformed file skipped, real task kept");
+        assert_eq!(all[0].id, st.id);
+
+        // A file from a hypothetical newer version (extra unknown field) still
+        // parses — no deny_unknown_fields => forward-compatible.
+        let p = dir.join(format!("{}.json", st.id));
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        v["future_field"] = serde_json::json!("ignored by older readers");
+        std::fs::write(&p, v.to_string()).unwrap();
+        let reread = read_shared_task(&st.id)
+            .await
+            .expect("extra unknown field still parses");
+        assert_eq!(reread.title, "Real");
 
         let _ = std::fs::remove_dir_all(&home);
     }

@@ -14,10 +14,11 @@ Status: proposed (Dac-approved direction, 2026-06-22). Owner: lakitu (model/MCP/
 
 ## `SharedTask` schema  — `tasks/shared/<id>.json`
 ```
-{ id, title, goal,
+{ id, title, goal?,
   scope: "team" | "fleet",   team?: "<owner/projectNumber>",
   owner, participants: [ "<agent>", ... ],
-  links: { issues: [ "<owner/repo#N>" ], prs: [ "<owner/repo#N>" ] },
+  issues: [ { repo: "<owner/name>", number } ],   // flat, each pinned to {repo, number}
+  prs:    [ { repo: "<owner/name>", number } ],
   state: "open" | "active" | "blocked" | "in-review" | "done",
   timeline: [ { state, ts, by } ],   // append-only transitions
   created, updated }
@@ -32,7 +33,7 @@ The robust fix is **not** forcing agents to update Lakitu; it's deriving state f
 `/tasks`: a card per SharedTask → participants (avatars) → linked PRs (live status pills) → a Start→Goal **timeline** plotting the transitions + PRs. Read-only SSR + htmx, rendered from the snapshot. lakitu exposes SharedTasks in the snapshot DTO; toad renders them.
 
 ## MCP tools (lakitu-mcp)
-`create_shared_task(title, goal, scope, team?)` · `link_shared_task(id, issue|pr)` · `join_shared_task(id)` · `advance_shared_task(id, state)`; snapshot DTO gains a `shared_tasks` array. Per-agent task tools (`add_task`/`read_tasks`/`complete_task`/`drop_task`) are untouched.
+`create_shared_task(owner, title, goal?, scope, team?)` · `link_shared_task(id, kind, repo, number)` · `join_shared_task(id, name)` · `advance_shared_task(id, state, by)` · `list_shared_tasks(name?, include_done?)`; the snapshot DTO gains a `shared_tasks` array. A dedicated `list_shared_tasks` (rather than overloading `read_tasks`) keeps private vs shared cleanly separated. Per-agent task tools (`add_task`/`read_tasks`/`complete_task`/`drop_task`) are untouched.
 
 ## Phasing & owners
 1. `SharedTask` model + store IO + MCP tools + snapshot DTO — **lakitu** (lakitu-mcp)
