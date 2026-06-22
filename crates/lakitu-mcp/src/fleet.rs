@@ -31,6 +31,9 @@ static MSG_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Disambiguates tasks created within the same instant.
 static TASK_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Disambiguates shared tasks created within the same instant.
+static SHARED_TASK_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// A short, collision-resistant 6-hex id from the wall clock + a process-local
 /// counter. Shared id scheme for messages and tasks (good enough — these are
 /// per-agent, low-volume, and only need to be unique within one list).
@@ -132,6 +135,121 @@ pub struct Task {
     pub pr: Option<TaskPr>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_msg: Option<String>,
+}
+
+/// A reference to a board issue or PR that a [`SharedTask`] groups together:
+/// `owner/repo` + number. (Distinct from [`TaskPr`], the single PR a private
+/// per-agent [`Task`] hangs off in the cockpit.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskRef {
+    pub repo: String,
+    pub number: u64,
+}
+
+/// Whether a [`SharedTask`] is owned by one team (board) or the whole fleet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskScope {
+    Team,
+    Fleet,
+}
+
+/// A [`SharedTask`]'s lifecycle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum SharedTaskState {
+    Open,
+    Active,
+    Blocked,
+    InReview,
+    Done,
+}
+
+/// Whether a `link_shared_task` target is an issue or a PR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum RefKind {
+    Issue,
+    Pr,
+}
+
+impl TaskScope {
+    /// The lowercase wire/display string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Team => "team",
+            Self::Fleet => "fleet",
+        }
+    }
+}
+
+impl SharedTaskState {
+    /// The wire/display string (kebab-case, so `InReview` → `in-review`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Active => "active",
+            Self::Blocked => "blocked",
+            Self::InReview => "in-review",
+            Self::Done => "done",
+        }
+    }
+}
+
+impl RefKind {
+    /// The display string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Issue => "issue",
+            Self::Pr => "PR",
+        }
+    }
+}
+
+/// One append-only transition in a [`SharedTask`]'s timeline: the state it moved
+/// to, when, and which agent (or the reconcile sweep) moved it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskEvent {
+    pub state: SharedTaskState,
+    pub ts: String,
+    pub by: String,
+}
+
+/// A shared task: a team- or fleet-scoped goal that *groups* board issues + PRs
+/// across agents, with participants and an append-only timeline. Unlike the
+/// per-agent [`Task`] (a private scratchpad), a SharedTask is the fleet's shared
+/// unit of coordinated work — it *references* issues/PRs rather than duplicating
+/// them, so the cockpit and web can show who's involved and how the work moves
+/// Start→Goal. Persisted one-file-per-task at `tasks/shared/<id>.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedTask {
+    pub id: String,
+    /// One-line title.
+    pub title: String,
+    /// Optional longer statement of the goal / definition of done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
+    pub scope: TaskScope,
+    /// For `scope = team`: the board it belongs to (`owner/projectNumber`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<String>,
+    /// The agent who created it (also its first participant).
+    pub owner: String,
+    /// Agents involved — owner + explicit joiners + auto-added PR authors.
+    #[serde(default)]
+    pub participants: Vec<String>,
+    /// Linked board issues.
+    #[serde(default)]
+    pub issues: Vec<TaskRef>,
+    /// Linked PRs.
+    #[serde(default)]
+    pub prs: Vec<TaskRef>,
+    pub state: SharedTaskState,
+    /// Append-only state transitions, oldest first; the first entry is creation.
+    #[serde(default)]
+    pub timeline: Vec<TaskEvent>,
+    pub created: String,
+    pub updated: String,
 }
 
 /// Summary row for `list_agents` (peer awareness).
@@ -888,6 +1006,177 @@ pub async fn drop_task(name: &str, id: &str) -> Result<bool> {
     Ok(removed)
 }
 
+// ---- Shared tasks (team/fleet goals grouping issues + PRs) -----------------
+// One JSON file per shared task at `tasks/shared/<id>.json` — not one array per
+// agent like private tasks. A shared task has many participants, so any agent
+// reads/advances it independently and a write touches only that one file.
+
+fn shared_tasks_dir() -> PathBuf {
+    store_root().join("tasks").join("shared")
+}
+
+fn shared_task_path(id: &str) -> PathBuf {
+    shared_tasks_dir().join(format!("{id}.json"))
+}
+
+/// Read one shared task by id. Missing/unreadable/malformed ⇒ `None`.
+pub async fn read_shared_task(id: &str) -> Option<SharedTask> {
+    let raw = fs::read_to_string(shared_task_path(&sanitize(id)))
+        .await
+        .ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// All shared tasks, newest-created first. Missing dir ⇒ empty.
+pub async fn list_shared_tasks() -> Vec<SharedTask> {
+    let mut out = Vec::new();
+    if let Ok(mut rd) = fs::read_dir(shared_tasks_dir()).await {
+        while let Ok(Some(ent)) = rd.next_entry().await {
+            let p = ent.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(raw) = fs::read_to_string(&p).await {
+                if let Ok(st) = serde_json::from_str::<SharedTask>(&raw) {
+                    out.push(st);
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| b.created.cmp(&a.created));
+    out
+}
+
+/// Atomically write a shared task (create or update).
+async fn write_shared_task(st: &SharedTask) -> Result<()> {
+    let dir = shared_tasks_dir();
+    fs::create_dir_all(&dir).await?;
+    let path = shared_task_path(&st.id);
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(st)?).await?;
+    fs::rename(&tmp, &path).await?;
+    Ok(())
+}
+
+/// Create a shared task. The owner becomes its first participant and creation is
+/// recorded as the first timeline entry. Returns the created task.
+pub async fn create_shared_task(
+    owner: &str,
+    title: &str,
+    goal: Option<String>,
+    scope: TaskScope,
+    team: Option<String>,
+) -> Result<SharedTask> {
+    let owner = sanitize(owner);
+    let title = title.trim();
+    if title.is_empty() {
+        bail!("shared task title must not be empty");
+    }
+    let team = team.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    if scope == TaskScope::Team && team.is_none() {
+        bail!("a team-scoped shared task needs a team (owner/projectNumber)");
+    }
+    let team = if scope == TaskScope::Team { team } else { None };
+
+    // Shared ids live in ONE namespace across every agent's MCP process (unlike
+    // per-agent task ids, which are namespaced by file), so guard against the
+    // rare clock+counter clash rather than silently overwriting a peer's task.
+    let mut id = short_id(&SHARED_TASK_COUNTER);
+    for _ in 0..8 {
+        if fs::metadata(shared_task_path(&id)).await.is_err() {
+            break; // path is free
+        }
+        id = short_id(&SHARED_TASK_COUNTER);
+    }
+
+    let now = now_iso();
+    let st = SharedTask {
+        id,
+        title: title.to_string(),
+        goal: goal.map(|g| g.trim().to_string()).filter(|g| !g.is_empty()),
+        scope,
+        team,
+        owner: owner.clone(),
+        participants: vec![owner.clone()],
+        issues: Vec::new(),
+        prs: Vec::new(),
+        state: SharedTaskState::Open,
+        timeline: vec![TaskEvent {
+            state: SharedTaskState::Open,
+            ts: now.clone(),
+            by: owner,
+        }],
+        created: now.clone(),
+        updated: now,
+    };
+    write_shared_task(&st).await?;
+    Ok(st)
+}
+
+/// Link a board issue or PR to a shared task (idempotent). Errors if no such task.
+pub async fn link_shared_task(
+    id: &str,
+    kind: RefKind,
+    repo: &str,
+    number: u64,
+) -> Result<SharedTask> {
+    let mut st = match read_shared_task(id).await {
+        Some(s) => s,
+        None => bail!("no shared task '{}'", sanitize(id)),
+    };
+    let repo = repo.trim().to_string();
+    if repo.is_empty() {
+        bail!("link repo must be 'owner/name'");
+    }
+    let list = match kind {
+        RefKind::Issue => &mut st.issues,
+        RefKind::Pr => &mut st.prs,
+    };
+    if !list.iter().any(|r| r.repo == repo && r.number == number) {
+        list.push(TaskRef { repo, number });
+        st.updated = now_iso();
+        write_shared_task(&st).await?;
+    }
+    Ok(st)
+}
+
+/// Add an agent to a shared task's participants (idempotent). Errors if no such task.
+pub async fn join_shared_task(id: &str, agent: &str) -> Result<SharedTask> {
+    let agent = sanitize(agent);
+    let mut st = match read_shared_task(id).await {
+        Some(s) => s,
+        None => bail!("no shared task '{}'", sanitize(id)),
+    };
+    if !st.participants.contains(&agent) {
+        st.participants.push(agent);
+        st.updated = now_iso();
+        write_shared_task(&st).await?;
+    }
+    Ok(st)
+}
+
+/// Move a shared task to a new state, appending a timeline entry (no-op if it is
+/// already in that state). `by` is the agent — or "reconcile" — making the move.
+pub async fn advance_shared_task(id: &str, state: SharedTaskState, by: &str) -> Result<SharedTask> {
+    let by = sanitize(by);
+    let mut st = match read_shared_task(id).await {
+        Some(s) => s,
+        None => bail!("no shared task '{}'", sanitize(id)),
+    };
+    if st.state != state {
+        let now = now_iso();
+        st.state = state;
+        st.timeline.push(TaskEvent {
+            state,
+            ts: now.clone(),
+            by,
+        });
+        st.updated = now;
+        write_shared_task(&st).await?;
+    }
+    Ok(st)
+}
+
 /// List all registered agents with current presence + unread count.
 pub async fn list_agents() -> Result<Vec<AgentSummary>> {
     let agents_dir = store_root().join("agents");
@@ -1016,6 +1305,13 @@ pub async fn snapshot() -> crate::wire::SnapshotDto {
         }
     }
 
+    // Shared tasks (team/fleet goals grouping issues + PRs across agents).
+    let shared_tasks: Vec<crate::wire::SharedTaskDto> = list_shared_tasks()
+        .await
+        .into_iter()
+        .map(shared_task_dto)
+        .collect();
+
     // Per-agent context% + the freshest account rate-limit usage.
     let mut usage: Option<(i64, UsageDto)> = None;
     let mut agents: Vec<AgentDto> = Vec::with_capacity(summaries.len());
@@ -1082,8 +1378,45 @@ pub async fn snapshot() -> crate::wire::SnapshotDto {
         agents,
         inboxes,
         tasks,
+        shared_tasks,
         projects: read_projects(&root).await,
         usage: usage.map(|(_, u)| u),
+    }
+}
+
+/// Convert a stored [`SharedTask`] into its wire DTO (enums → display strings).
+fn shared_task_dto(st: SharedTask) -> crate::wire::SharedTaskDto {
+    use crate::wire::{SharedTaskDto, TaskEventDto, TaskRefDto};
+    let to_refs = |v: Vec<TaskRef>| -> Vec<TaskRefDto> {
+        v.into_iter()
+            .map(|r| TaskRefDto {
+                repo: r.repo,
+                number: r.number,
+            })
+            .collect()
+    };
+    SharedTaskDto {
+        id: st.id,
+        title: st.title,
+        goal: st.goal,
+        scope: st.scope.as_str().to_string(),
+        team: st.team,
+        owner: st.owner,
+        participants: st.participants,
+        issues: to_refs(st.issues),
+        prs: to_refs(st.prs),
+        state: st.state.as_str().to_string(),
+        timeline: st
+            .timeline
+            .into_iter()
+            .map(|e| TaskEventDto {
+                state: e.state.as_str().to_string(),
+                ts: e.ts,
+                by: e.by,
+            })
+            .collect(),
+        created: st.created,
+        updated: st.updated,
     }
 }
 
@@ -1451,6 +1784,120 @@ mod tests {
             "second drop ⇒ false"
         );
         assert_eq!(read_tasks("aria").await.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // _env guard intentionally held across .await
+    async fn round_trip_shared_tasks() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("fleet-shared-tasks-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: TEST_ENV_LOCK serializes the HOME-mutating tests.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("LAKITU_FLEET_ROOT");
+            std::env::remove_var("GENBOT_ROOT");
+        }
+
+        // Empty to start.
+        assert!(list_shared_tasks().await.is_empty());
+
+        // Create a fleet task: owner is first participant, title trimmed, creation
+        // is the first timeline entry.
+        let st = create_shared_task(
+            "lakitu",
+            "  Release 0.3.1  ",
+            Some("  publish both crates  ".into()),
+            TaskScope::Fleet,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(st.id.len(), 6);
+        assert_eq!(st.title, "Release 0.3.1", "title trimmed");
+        assert_eq!(st.goal.as_deref(), Some("publish both crates"));
+        assert_eq!(st.scope, TaskScope::Fleet);
+        assert!(st.team.is_none());
+        assert_eq!(st.participants, vec!["lakitu".to_string()]);
+        assert_eq!(st.state, SharedTaskState::Open);
+        assert_eq!(st.timeline.len(), 1);
+        assert_eq!(st.timeline[0].by, "lakitu");
+
+        // Team scope requires a team; reads back by id; unknown id ⇒ None.
+        assert!(
+            create_shared_task("lakitu", "x", None, TaskScope::Team, None)
+                .await
+                .is_err(),
+            "team scope without a team is rejected"
+        );
+        let team = create_shared_task(
+            "toad",
+            "Ship the web UI",
+            None,
+            TaskScope::Team,
+            Some("  dac2k9/1  ".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(team.team.as_deref(), Some("dac2k9/1"), "team trimmed");
+        assert_eq!(
+            read_shared_task(&st.id).await.unwrap().title,
+            "Release 0.3.1"
+        );
+        assert!(read_shared_task("nope").await.is_none());
+
+        // Linking is idempotent and pinned to {repo, number}.
+        link_shared_task(&st.id, RefKind::Issue, "dac2k9/lakitu-oss", 5)
+            .await
+            .unwrap();
+        link_shared_task(&st.id, RefKind::Pr, "dac2k9/lakitu-oss", 9)
+            .await
+            .unwrap();
+        let linked = link_shared_task(&st.id, RefKind::Pr, "dac2k9/lakitu-oss", 9)
+            .await
+            .unwrap();
+        assert_eq!(linked.issues.len(), 1);
+        assert_eq!(linked.prs.len(), 1, "re-linking the same PR is idempotent");
+
+        // Joining adds a participant; idempotent.
+        join_shared_task(&st.id, "protoman").await.unwrap();
+        let joined = join_shared_task(&st.id, "protoman").await.unwrap();
+        assert_eq!(joined.participants.len(), 2, "re-join is idempotent");
+
+        // Advancing appends a transition; same-state advance is a no-op.
+        let adv = advance_shared_task(&st.id, SharedTaskState::Active, "lakitu")
+            .await
+            .unwrap();
+        assert_eq!(adv.state, SharedTaskState::Active);
+        assert_eq!(adv.timeline.len(), 2);
+        let adv = advance_shared_task(&st.id, SharedTaskState::Active, "lakitu")
+            .await
+            .unwrap();
+        assert_eq!(adv.timeline.len(), 2, "same-state advance is a no-op");
+        advance_shared_task(&st.id, SharedTaskState::Done, "lakitu")
+            .await
+            .unwrap();
+
+        // The store lists both (participant/done filtering lives in the tool layer).
+        assert_eq!(list_shared_tasks().await.len(), 2);
+
+        // Snapshot surfaces shared tasks with enums rendered as wire strings.
+        let snap = snapshot().await;
+        assert_eq!(snap.shared_tasks.len(), 2);
+        let rel = snap
+            .shared_tasks
+            .iter()
+            .find(|t| t.id == st.id)
+            .expect("release task in snapshot");
+        assert_eq!(rel.scope, "fleet");
+        assert_eq!(rel.state, "done");
+        assert_eq!(rel.prs.len(), 1);
+        assert_eq!(rel.participants.len(), 2);
+        assert_eq!(rel.timeline.last().unwrap().state, "done");
 
         let _ = std::fs::remove_dir_all(&home);
     }

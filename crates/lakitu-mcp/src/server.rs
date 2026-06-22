@@ -1517,6 +1517,139 @@ impl AgentBoardService {
             )
         }))
     }
+
+    #[tool(
+        name = "create_shared_task",
+        description = "Create a SHARED task — a team- or fleet-scoped goal that groups board issues \
+        + PRs across agents, with participants and a Start→Goal timeline. Use this for coordinated \
+        work spanning multiple agents/PRs (a release, a cross-repo feature), NOT a private reminder \
+        (use add_task for those). You become the owner + first participant. Returns the new id; link \
+        issues/PRs with link_shared_task and move it with advance_shared_task."
+    )]
+    async fn create_shared_task(
+        &self,
+        Parameters(req): Parameters<CreateSharedTaskRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let st = fleet::create_shared_task(
+            &req.owner,
+            &req.title,
+            req.goal.clone(),
+            req.scope,
+            req.team.clone(),
+        )
+        .await
+        .map_err(mcp)?;
+        Ok(text(format!(
+            "Created shared task {id} ({scope}): {title}",
+            id = st.id,
+            scope = st.scope.as_str(),
+            title = st.title
+        )))
+    }
+
+    #[tool(
+        name = "link_shared_task",
+        description = "Link a board issue or PR to a shared task (idempotent). Pins the link to \
+        {repo, number} so the cockpit/web shows the related work and the reconcile sweep can track \
+        it. `kind` is 'issue' or 'pr'."
+    )]
+    async fn link_shared_task(
+        &self,
+        Parameters(req): Parameters<LinkSharedTaskRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let st = fleet::link_shared_task(&req.id, req.kind, &req.repo, req.number)
+            .await
+            .map_err(mcp)?;
+        Ok(text(format!(
+            "Linked {kind} {repo}#{number} to shared task {id} ({ni} issues, {npr} PRs).",
+            kind = req.kind.as_str(),
+            repo = req.repo,
+            number = req.number,
+            id = st.id,
+            ni = st.issues.len(),
+            npr = st.prs.len(),
+        )))
+    }
+
+    #[tool(
+        name = "join_shared_task",
+        description = "Add yourself to a shared task's participants (idempotent) — do this when you \
+        start contributing to a shared goal, so the cockpit/web shows you on it."
+    )]
+    async fn join_shared_task(
+        &self,
+        Parameters(req): Parameters<JoinSharedTaskRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let st = fleet::join_shared_task(&req.id, &req.name)
+            .await
+            .map_err(mcp)?;
+        Ok(text(format!(
+            "{name} joined shared task {id} ({n} participants).",
+            name = fleet::sanitize(&req.name),
+            id = st.id,
+            n = st.participants.len(),
+        )))
+    }
+
+    #[tool(
+        name = "advance_shared_task",
+        description = "Move a shared task to a new state (open / active / blocked / in-review / \
+        done), appending a timeline entry stamped with who moved it. Idempotent (no-op if already \
+        in that state). Use it to reflect real progress on the shared goal."
+    )]
+    async fn advance_shared_task(
+        &self,
+        Parameters(req): Parameters<AdvanceSharedTaskRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let st = fleet::advance_shared_task(&req.id, req.state, &req.by)
+            .await
+            .map_err(mcp)?;
+        Ok(text(format!(
+            "Shared task {id} → {state}.",
+            id = st.id,
+            state = st.state.as_str(),
+        )))
+    }
+
+    #[tool(
+        name = "list_shared_tasks",
+        description = "List SHARED tasks (team/fleet goals). Pass your `name` to see only the ones \
+        you're a participant in; omit it to list all. Each row shows the id, state, scope, title, \
+        and participant / issue / PR counts. Use the id with link/join/advance_shared_task."
+    )]
+    async fn list_shared_tasks(
+        &self,
+        Parameters(req): Parameters<ListSharedTasksRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let include_done = req.include_done.unwrap_or(false);
+        let me = req.name.as_ref().map(|n| fleet::sanitize(n));
+        let all = fleet::list_shared_tasks().await;
+        let shown: Vec<&fleet::SharedTask> = all
+            .iter()
+            .filter(|t| include_done || t.state != fleet::SharedTaskState::Done)
+            .filter(|t| match &me {
+                Some(n) => t.participants.iter().any(|p| p == n),
+                None => true,
+            })
+            .collect();
+        if shown.is_empty() {
+            return Ok(text("No shared tasks.".to_string()));
+        }
+        let mut out = String::new();
+        for t in &shown {
+            out.push_str(&format!(
+                "{id}  [{state}] {scope}  {title}  ({np}p {ni}i {npr}pr)\n",
+                id = t.id,
+                state = t.state.as_str(),
+                scope = t.scope.as_str(),
+                title = t.title,
+                np = t.participants.len(),
+                ni = t.issues.len(),
+                npr = t.prs.len(),
+            ));
+        }
+        Ok(text(out))
+    }
 }
 
 #[tool_handler]
@@ -1876,6 +2009,70 @@ pub struct TaskIdRequest {
     pub name: String,
     #[schemars(description = "The task id — the 6-char id shown by read_tasks.")]
     pub id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateSharedTaskRequest {
+    #[schemars(
+        description = "Your own agent name — you become the shared task's owner and first participant."
+    )]
+    pub owner: String,
+    #[schemars(
+        description = "One-line title of the shared goal (e.g. 'Release 0.3.1', 'Ship the web UI')."
+    )]
+    pub title: String,
+    #[schemars(description = "Optional longer statement of the goal / definition of done.")]
+    #[serde(default)]
+    pub goal: Option<String>,
+    #[schemars(description = "Who shares it: 'team' (one board) or 'fleet' (everyone).")]
+    pub scope: fleet::TaskScope,
+    #[schemars(
+        description = "For scope=team: the board it belongs to, 'owner/projectNumber' (e.g. 'fossid-ab/14'). Required for team scope; ignored for fleet."
+    )]
+    #[serde(default)]
+    pub team: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LinkSharedTaskRequest {
+    #[schemars(description = "The shared task id (from create_shared_task / list_shared_tasks).")]
+    pub id: String,
+    #[schemars(description = "What you're linking: 'issue' or 'pr'.")]
+    pub kind: fleet::RefKind,
+    #[schemars(description = "The repo of the issue/PR, 'owner/name' (e.g. 'dac2k9/lakitu-oss').")]
+    pub repo: String,
+    #[schemars(description = "The issue or PR number.")]
+    pub number: u64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct JoinSharedTaskRequest {
+    #[schemars(description = "Your own agent name — added to the shared task's participants.")]
+    pub name: String,
+    #[schemars(description = "The shared task id to join.")]
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AdvanceSharedTaskRequest {
+    #[schemars(description = "Your own agent name — recorded in the timeline as who moved it.")]
+    pub by: String,
+    #[schemars(description = "The shared task id to advance.")]
+    pub id: String,
+    #[schemars(description = "The new state: open, active, blocked, in-review, or done.")]
+    pub state: fleet::SharedTaskState,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListSharedTasksRequest {
+    #[schemars(
+        description = "Optional: your agent name, to show only shared tasks you're a participant in. Omit to list all."
+    )]
+    #[serde(default)]
+    pub name: Option<String>,
+    #[schemars(description = "If true, include done tasks too. Default false (hides completed).")]
+    #[serde(default)]
+    pub include_done: Option<bool>,
 }
 
 /// Declared agent state. Lowercase on the wire to match the heartbeat
