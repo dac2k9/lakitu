@@ -96,6 +96,17 @@ fn now_iso() -> String {
         .to_string()
 }
 
+/// Does `s` look like a GitHub `owner/name` slug — exactly two non-empty,
+/// slash-free segments? Used to reject a typo'd link ref before it's stored and
+/// then silently fails to resolve in the reconcile's gh queries.
+fn is_repo_slug(s: &str) -> bool {
+    let mut parts = s.split('/');
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some(o), Some(n), None) if !o.is_empty() && !n.is_empty()
+    )
+}
+
 /// One inbox message — same shape the TUI reads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -193,6 +204,37 @@ impl SharedTaskState {
             Self::InReview => "in-review",
             Self::Done => "done",
         }
+    }
+
+    /// Rank on the open → active → in-review → done progression. `Blocked` sits
+    /// off this axis (a manual "stuck" flag), so it shares Active's rank and is
+    /// never auto-entered or left by the reconcile.
+    fn progress_rank(self) -> u8 {
+        match self {
+            Self::Open => 0,
+            Self::Active | Self::Blocked => 1,
+            Self::InReview => 2,
+            Self::Done => 3,
+        }
+    }
+
+    /// The state the reconcile sweep would move a task to, given whether any of
+    /// its linked PRs are open / merged — or `None` to leave it unchanged. This
+    /// is the trust policy in one place: it only nudges the progression FORWARD
+    /// (monotonic), never auto-completes (`Done` is a human call — no
+    /// gate-bypass), and never overrides a manual `Blocked` or a terminal `Done`.
+    pub fn reconciled_to(self, has_open_pr: bool, has_merged_pr: bool) -> Option<Self> {
+        if matches!(self, Self::Done | Self::Blocked) {
+            return None; // terminal / manual — reconcile never overrides
+        }
+        let target = if has_merged_pr {
+            Self::InReview
+        } else if has_open_pr {
+            Self::Active
+        } else {
+            return None;
+        };
+        (target.progress_rank() > self.progress_rank()).then_some(target)
     }
 }
 
@@ -1137,8 +1179,8 @@ pub async fn link_shared_task(
         None => bail!("no shared task '{}'", sanitize(id)),
     };
     let repo = repo.trim().to_string();
-    if repo.is_empty() {
-        bail!("link repo must be 'owner/name'");
+    if !is_repo_slug(&repo) {
+        bail!("link repo must look like 'owner/name'");
     }
     let list = match kind {
         RefKind::Issue => &mut st.issues,
@@ -1958,5 +2000,38 @@ mod tests {
         assert_eq!(reread.title, "Real");
 
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn reconcile_state_policy() {
+        use SharedTaskState::*;
+        // A linked open PR nudges toward active; a merged one toward in-review.
+        assert_eq!(Open.reconciled_to(true, false), Some(Active));
+        assert_eq!(Open.reconciled_to(false, true), Some(InReview));
+        assert_eq!(Active.reconciled_to(false, true), Some(InReview));
+        // Idempotent / no forward signal => no change.
+        assert_eq!(Active.reconciled_to(true, false), None);
+        assert_eq!(InReview.reconciled_to(false, true), None);
+        assert_eq!(Open.reconciled_to(false, false), None);
+        // Monotonic: a new open PR after in-review never regresses the task.
+        assert_eq!(InReview.reconciled_to(true, false), None);
+        // No gate-bypass / no override of manual or terminal states.
+        assert_eq!(InReview.reconciled_to(true, true), None, "never auto-done");
+        assert_eq!(Done.reconciled_to(true, true), None, "terminal");
+        assert_eq!(
+            Blocked.reconciled_to(false, true),
+            None,
+            "manual block kept"
+        );
+    }
+
+    #[test]
+    fn repo_slug_shape() {
+        assert!(is_repo_slug("dac2k9/lakitu"));
+        assert!(!is_repo_slug("lakitu"), "no slash");
+        assert!(!is_repo_slug("a/b/c"), "too many segments");
+        assert!(!is_repo_slug("/lakitu"), "empty owner");
+        assert!(!is_repo_slug("dac2k9/"), "empty name");
+        assert!(!is_repo_slug(""));
     }
 }
