@@ -155,6 +155,10 @@ pub struct Task {
 pub struct TaskRef {
     pub repo: String,
     pub number: u64,
+    /// Cached GitHub state for the snapshot's status pills (PR: open/draft/
+    /// merged/closed; issue: open/closed). Refreshed by the reconcile sweep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 /// Whether a [`SharedTask`] is owned by one team (board) or the whole fleet.
@@ -1191,7 +1195,11 @@ pub async fn link_shared_task(
         RefKind::Pr => &mut st.prs,
     };
     if !list.iter().any(|r| r.repo == repo && r.number == number) {
-        list.push(TaskRef { repo, number });
+        list.push(TaskRef {
+            repo,
+            number,
+            state: None,
+        });
         st.updated = now_iso();
         write_shared_task(&st).await?;
     }
@@ -1270,6 +1278,32 @@ pub async fn reconcile_advance(
     st.updated = now;
     write_shared_task(&st).await?;
     Ok(Some(next))
+}
+
+/// Cache the GitHub `state` of linked refs (gathered by the reconcile sweep)
+/// onto the stored task, so the snapshot's status pills need no live gh call. A
+/// `(repo, number)` is unique across a task's issues + PRs (GitHub numbers them
+/// in one sequence), so we match either list. Writes only if something changed.
+pub async fn cache_ref_states(id: &str, states: &[(String, u64, String)]) -> Result<()> {
+    let mut st = match read_shared_task(id).await {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+    let mut changed = false;
+    for (repo, number, state) in states {
+        for r in st.issues.iter_mut().chain(st.prs.iter_mut()) {
+            if &r.repo == repo && r.number == *number && r.state.as_deref() != Some(state.as_str())
+            {
+                r.state = Some(state.clone());
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        st.updated = now_iso();
+        write_shared_task(&st).await?;
+    }
+    Ok(())
 }
 
 /// List all registered agents with current presence + unread count.
@@ -1487,6 +1521,7 @@ fn shared_task_dto(st: SharedTask) -> crate::wire::SharedTaskDto {
             .map(|r| TaskRefDto {
                 repo: r.repo,
                 number: r.number,
+                state: r.state,
             })
             .collect()
     };
@@ -2127,6 +2162,59 @@ mod tests {
             read_shared_task(&st.id).await.unwrap().state,
             SharedTaskState::Done,
             "reconcile must not regress a human Done"
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // _env guard intentionally held across .await
+    async fn cache_ref_states_persists() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("fleet-ref-state-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: TEST_ENV_LOCK serializes the HOME-mutating tests.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("LAKITU_FLEET_ROOT");
+            std::env::remove_var("GENBOT_ROOT");
+        }
+
+        let st = create_shared_task("lakitu", "Ship it", None, TaskScope::Fleet, None)
+            .await
+            .unwrap();
+        link_shared_task(&st.id, RefKind::Pr, "acme/x", 9)
+            .await
+            .unwrap();
+        link_shared_task(&st.id, RefKind::Issue, "acme/x", 4)
+            .await
+            .unwrap();
+
+        // Cached GitHub states round-trip onto the refs.
+        cache_ref_states(
+            &st.id,
+            &[
+                ("acme/x".to_string(), 9, "merged".to_string()),
+                ("acme/x".to_string(), 4, "closed".to_string()),
+            ],
+        )
+        .await
+        .unwrap();
+        let got = read_shared_task(&st.id).await.unwrap();
+        assert_eq!(got.prs[0].state.as_deref(), Some("merged"));
+        assert_eq!(got.issues[0].state.as_deref(), Some("closed"));
+
+        // An unknown ref is a silent no-op (no panic, existing state untouched).
+        cache_ref_states(&st.id, &[("acme/x".to_string(), 999, "open".to_string())])
+            .await
+            .unwrap();
+        assert_eq!(
+            read_shared_task(&st.id).await.unwrap().prs[0]
+                .state
+                .as_deref(),
+            Some("merged")
         );
 
         let _ = std::fs::remove_dir_all(&home);

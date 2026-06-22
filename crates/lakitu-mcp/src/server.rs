@@ -1726,19 +1726,30 @@ impl AgentBoardService {
                     }
                 }
             }
-            // Authenticated state of every linked PR drives a forward-only advance;
-            // track the triggering PR so the timeline note can name it.
+            // GitHub state of every linked ref — cached on the ref for the
+            // snapshot's status pills, and (for PRs) the forward-only advance
+            // signal. PRs: open|draft|merged|closed; issues: open|closed.
+            let mut states: Vec<(String, u64, String)> = Vec::new();
+            for issue in &t.issues {
+                if let Some(s) = ref_state(fleet::RefKind::Issue, &issue.repo, issue.number).await {
+                    states.push((issue.repo.clone(), issue.number, s));
+                }
+            }
             let mut open_pr: Option<(String, u64)> = None;
             let mut merged_pr: Option<(String, u64)> = None;
             for (repo, pr) in &linked {
-                match pr_state(*pr, repo).await {
-                    Ok(PrState::Open) if open_pr.is_none() => open_pr = Some((repo.clone(), *pr)),
-                    Ok(PrState::Merged) if merged_pr.is_none() => {
-                        merged_pr = Some((repo.clone(), *pr))
+                if let Some(s) = ref_state(fleet::RefKind::Pr, repo, *pr).await {
+                    match s.as_str() {
+                        "open" | "draft" if open_pr.is_none() => {
+                            open_pr = Some((repo.clone(), *pr))
+                        }
+                        "merged" if merged_pr.is_none() => merged_pr = Some((repo.clone(), *pr)),
+                        _ => {}
                     }
-                    _ => {}
+                    states.push((repo.clone(), *pr, s));
                 }
             }
+            fleet::cache_ref_states(&t.id, &states).await.ok();
             let note = match (&merged_pr, &open_pr) {
                 (Some((r, n)), _) => format!("merged {r}#{n}"),
                 (None, Some((r, n))) => format!("PR {r}#{n} open"),
@@ -2551,6 +2562,46 @@ enum PrState {
     Open,
     Closed,
     Merged,
+}
+
+/// The GitHub state of a linked ref, as a short string for the snapshot's status
+/// pills. PRs: "open" | "draft" | "merged" | "closed"; issues: "open" | "closed".
+/// Returns `None` on any gh/JSON error, so a bad ref never aborts the sweep.
+async fn ref_state(kind: fleet::RefKind, repo_slug: &str, number: u64) -> Option<String> {
+    let n = number.to_string();
+    let out = match kind {
+        fleet::RefKind::Pr => {
+            let json = run_gh(&[
+                "pr",
+                "view",
+                &n,
+                "--repo",
+                repo_slug,
+                "--json",
+                "state,isDraft",
+            ])
+            .await
+            .ok()?;
+            let v: serde_json::Value = serde_json::from_str(&json).ok()?;
+            match v["state"].as_str()? {
+                "MERGED" => "merged",
+                "CLOSED" => "closed",
+                _ if v["isDraft"].as_bool().unwrap_or(false) => "draft",
+                _ => "open",
+            }
+        }
+        fleet::RefKind::Issue => {
+            let json = run_gh(&["issue", "view", &n, "--repo", repo_slug, "--json", "state"])
+                .await
+                .ok()?;
+            let v: serde_json::Value = serde_json::from_str(&json).ok()?;
+            match v["state"].as_str()? {
+                "CLOSED" => "closed",
+                _ => "open",
+            }
+        }
+    };
+    Some(out.to_string())
 }
 
 /// Re-query a single PR's state — used when a logged card is no longer in the

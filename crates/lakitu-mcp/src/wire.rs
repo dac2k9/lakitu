@@ -123,6 +123,9 @@ pub struct TaskRefDto {
     /// `owner/name`.
     pub repo: String,
     pub number: u64,
+    /// Cached GitHub state for the status pill (PR: open/draft/merged/closed;
+    /// issue: open/closed). `None` until the reconcile has seen it.
+    pub state: Option<String>,
 }
 
 /// One transition in a [`SharedTaskDto`]'s timeline.
