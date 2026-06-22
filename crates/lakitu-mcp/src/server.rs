@@ -621,11 +621,24 @@ impl AgentBoardService {
         // only emits for PRs the cockpit hasn't seen — idempotent across
         // repeated sweeps.
         let logged = read_logged_prs().await;
+        // PRs already linked to a shared task (any of them), so we can flag the
+        // open PRs that AREN'T — nudging the agent to link them (or add a
+        // `Fixes #N`) so the shared-task reconcile can track them.
+        let linked_to_task: std::collections::HashSet<(String, u64)> = fleet::list_shared_tasks()
+            .await
+            .iter()
+            .flat_map(|t| {
+                t.prs
+                    .iter()
+                    .map(|r| (normalize_repo_slug(Some(r.repo.as_str())), r.number))
+            })
+            .collect();
 
         let multi = repos.len() > 1;
         let mut out = String::new();
         let mut emitted = 0usize;
         let mut reconciled = 0usize;
+        let mut unlinked = 0usize;
         for repo_slug in &repos {
             if multi {
                 out.push_str(&format!("== {repo_slug} ==\n"));
@@ -642,9 +655,14 @@ impl AgentBoardService {
             }
             for (number, branch, sha, is_draft, unanswered, failing, behind) in &rows {
                 out.push_str(&format!(
-                    "#{number}  draft={is_draft}  unanswered={unanswered}  failing={failing}  behind={behind}  branch={branch}  sha={short}\n",
+                    "#{number}  draft={is_draft}  unanswered={unanswered}  failing={failing}  behind={behind}  branch={branch}  sha={short}",
                     short = &sha[..sha.len().min(8)],
                 ));
+                if !linked_to_task.contains(&(repo_slug.clone(), *number)) {
+                    out.push_str("  ⚠ no shared-task link");
+                    unlinked += 1;
+                }
+                out.push('\n');
                 // Back-fill: register PRs the cockpit hasn't logged yet so
                 // they surface in the dashboard. `pr-opened` keys a PR-only
                 // work item (InReview); a non-draft PR also gets
@@ -728,6 +746,11 @@ impl AgentBoardService {
             out.push_str(&format!(
                 "({reconciled} stale card{} reconciled out)\n",
                 if reconciled == 1 { "" } else { "s" }
+            ));
+        }
+        if unlinked > 0 {
+            out.push_str(&format!(
+                "\n⚠ {unlinked} open PR(s) not linked to a shared task — add \"Fixes #<issue>\" (the reconcile auto-links those) or call link_shared_task(id, pr).\n"
             ));
         }
         Ok(text(out))

@@ -26,7 +26,7 @@ Status: proposed (Dac-approved direction, 2026-06-22). Owner: lakitu (model/MCP/
 
 ## #3, the enforcement win — observe GitHub, don't nag
 The robust fix is **not** forcing agents to update Lakitu; it's deriving state from reality. Extend the existing reconcile/sweep: each pass, for every SharedTask's linked issues, find PRs that close them (`Fixes/Closes #N`) → auto-link the PR, add its author as a participant, map the PR/issue state → `SharedTask.state`, and append a timeline transition. A SharedTask then **self-populates and self-advances** from GitHub — an agent forgetting to update Lakitu stops mattering.
-- Backstop: a **Stop-hook nudge** (like inbox-wake) for an open PR with no `Fixes #N` → "link PR #N to a task before idling."
+- Backstop (P3): `sweep_agent_prs` **flags any open PR not linked to a shared task** (⚠ + a suggestion to add `Fixes #N` or `link_shared_task`). Chosen over a Stop-hook nudge — the Stop hooks are deliberately zero-token, and detecting an unlinked PR would need a gh call per idle; the sweep already holds the open PRs + bodies, so flagging there is accurate and ~free.
 - Daemon-era: a GitHub **webhook** on PR events → real-time updates instead of polling.
 
 ## Web view (toad) — P4
@@ -38,7 +38,7 @@ The robust fix is **not** forcing agents to update Lakitu; it's deriving state f
 ## Phasing & owners
 1. `SharedTask` model + store IO + MCP tools + snapshot DTO — **lakitu** (lakitu-mcp)
 2. Auto-sync reconcile (extend the sweep) — **lakitu**
-3. Stop-hook nudge — **lakitu** (hooks)
+3. Unlinked-PR flag in `sweep_agent_prs` — **lakitu** (chosen over a Stop-hook nudge; see #3)
 4. Web `/tasks` view — **toad** (+ lakitu on the snapshot DTO); coordinate once 1–3 land
 
 protoman reviews each PR.
