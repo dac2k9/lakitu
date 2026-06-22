@@ -1624,7 +1624,7 @@ impl AgentBoardService {
         &self,
         Parameters(req): Parameters<AdvanceSharedTaskRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let st = fleet::advance_shared_task(&req.id, req.state, &req.by)
+        let st = fleet::advance_shared_task(&req.id, req.state, &req.by, req.note.as_deref())
             .await
             .map_err(mcp)?;
         Ok(text(format!(
@@ -1726,18 +1726,33 @@ impl AgentBoardService {
                     }
                 }
             }
-            // Authenticated state of every linked PR drives a forward-only advance.
-            let mut has_open = false;
-            let mut has_merged = false;
+            // Authenticated state of every linked PR drives a forward-only advance;
+            // track the triggering PR so the timeline note can name it.
+            let mut open_pr: Option<(String, u64)> = None;
+            let mut merged_pr: Option<(String, u64)> = None;
             for (repo, pr) in &linked {
                 match pr_state(*pr, repo).await {
-                    Ok(PrState::Open) => has_open = true,
-                    Ok(PrState::Merged) => has_merged = true,
-                    Ok(PrState::Closed) | Err(_) => {}
+                    Ok(PrState::Open) if open_pr.is_none() => open_pr = Some((repo.clone(), *pr)),
+                    Ok(PrState::Merged) if merged_pr.is_none() => {
+                        merged_pr = Some((repo.clone(), *pr))
+                    }
+                    _ => {}
                 }
             }
-            if let Ok(Some(next)) = fleet::reconcile_advance(&t.id, has_open, has_merged).await {
-                out.push_str(&format!("  {}: -> {}\n", t.id, next.as_str()));
+            let note = match (&merged_pr, &open_pr) {
+                (Some((r, n)), _) => format!("merged {r}#{n}"),
+                (None, Some((r, n))) => format!("PR {r}#{n} open"),
+                _ => String::new(),
+            };
+            if let Ok(Some(next)) = fleet::reconcile_advance(
+                &t.id,
+                open_pr.is_some(),
+                merged_pr.is_some(),
+                Some(note.as_str()),
+            )
+            .await
+            {
+                out.push_str(&format!("  {}: -> {}  ({note})\n", t.id, next.as_str()));
                 advanced += 1;
             }
             if new_links > 0 || new_parts > 0 {
@@ -2173,6 +2188,11 @@ pub struct AdvanceSharedTaskRequest {
     pub id: String,
     #[schemars(description = "The new state: open, active, blocked, in-review, or done.")]
     pub state: fleet::SharedTaskState,
+    #[schemars(
+        description = "Optional short note for the timeline — why the move happened (e.g. 'CI green, ready for review')."
+    )]
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
