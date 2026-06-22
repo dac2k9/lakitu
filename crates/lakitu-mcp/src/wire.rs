@@ -19,6 +19,10 @@ pub struct SnapshotDto {
     /// Per-agent task list, keyed by name; declared order (oldest first). Open
     /// + done — the cockpit filters/folds.
     pub tasks: BTreeMap<String, Vec<TaskDto>>,
+    /// Team/fleet-scoped shared tasks — goals grouping issues + PRs across
+    /// agents, with participants and a Start→Goal timeline. Rendered by the web
+    /// `/tasks` view; the TUI ignores them for now (unknown field → dropped).
+    pub shared_tasks: Vec<SharedTaskDto>,
     pub projects: Vec<ProjectDto>,
     pub usage: Option<UsageDto>,
 }
@@ -86,6 +90,50 @@ pub struct TaskPrDto {
     /// `owner/name`.
     pub repo: String,
     pub number: u64,
+}
+
+/// A team/fleet-scoped shared task: a goal grouping board issues + PRs across
+/// agents, with participants and an append-only Start→Goal timeline. Distinct
+/// from [`TaskDto`] (a private, per-agent reminder).
+#[derive(Serialize)]
+pub struct SharedTaskDto {
+    pub id: String,
+    pub title: String,
+    pub goal: Option<String>,
+    /// "team" | "fleet".
+    pub scope: String,
+    /// For team scope: the board, `owner/projectNumber`.
+    pub team: Option<String>,
+    pub owner: String,
+    pub participants: Vec<String>,
+    pub issues: Vec<TaskRefDto>,
+    pub prs: Vec<TaskRefDto>,
+    /// "open" | "active" | "blocked" | "in-review" | "done".
+    pub state: String,
+    pub timeline: Vec<TaskEventDto>,
+    /// RFC3339.
+    pub created: String,
+    /// RFC3339.
+    pub updated: String,
+}
+
+/// A board issue or PR linked to a [`SharedTaskDto`].
+#[derive(Serialize)]
+pub struct TaskRefDto {
+    /// `owner/name`.
+    pub repo: String,
+    pub number: u64,
+}
+
+/// One transition in a [`SharedTaskDto`]'s timeline.
+#[derive(Serialize)]
+pub struct TaskEventDto {
+    /// State moved to: "open" | "active" | "blocked" | "in-review" | "done".
+    pub state: String,
+    /// RFC3339.
+    pub ts: String,
+    /// Agent (or "reconcile") who made the move.
+    pub by: String,
 }
 
 #[derive(Serialize)]
