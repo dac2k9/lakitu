@@ -1650,6 +1650,86 @@ impl AgentBoardService {
         }
         Ok(text(out))
     }
+
+    #[tool(
+        name = "sweep_shared_tasks",
+        description = "Reconcile shared tasks against GitHub. For each shared task: \
+        discover the PRs that close its linked issues (auto-linking them and crediting \
+        each closing PR's author as a participant), then advance the task's state from \
+        the real PR states — an open PR => active, a merged one => in-review. Never \
+        auto-completes (done stays a human call) and never regresses or overrides a \
+        manual blocked/done. Idempotent; safe to run on a schedule. Pass `id` to \
+        reconcile one task, or omit to sweep all."
+    )]
+    async fn sweep_shared_tasks(
+        &self,
+        Parameters(req): Parameters<SweepSharedTasksRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let want = req.id.as_deref().map(fleet::sanitize);
+        let tasks = fleet::list_shared_tasks().await;
+        let mut out = String::new();
+        let mut advanced = 0usize;
+        for t in &tasks {
+            if want.as_ref().is_some_and(|w| &t.id != w) {
+                continue;
+            }
+            // Links we already have; discover more from each linked issue.
+            let mut linked: std::collections::HashSet<(String, u64)> =
+                t.prs.iter().map(|r| (r.repo.clone(), r.number)).collect();
+            let mut joined: std::collections::HashSet<String> =
+                t.participants.iter().cloned().collect();
+            let mut new_links = 0usize;
+            let mut new_parts = 0usize;
+            for issue in &t.issues {
+                if issue.repo.split_once('/').is_none() {
+                    continue; // malformed ref — skip so one bad ref can't abort the pass
+                }
+                for (pr_repo, pr, author) in issue_closing_prs(&issue.repo, issue.number).await {
+                    let key = (pr_repo.clone(), pr);
+                    if !linked.contains(&key)
+                        && fleet::link_shared_task(&t.id, fleet::RefKind::Pr, &pr_repo, pr)
+                            .await
+                            .is_ok()
+                    {
+                        linked.insert(key);
+                        new_links += 1;
+                    }
+                    if !author.is_empty()
+                        && !joined.contains(&author)
+                        && fleet::join_shared_task(&t.id, &author).await.is_ok()
+                    {
+                        joined.insert(author.clone());
+                        new_parts += 1;
+                    }
+                }
+            }
+            // Authenticated state of every linked PR drives a forward-only advance.
+            let mut has_open = false;
+            let mut has_merged = false;
+            for (repo, pr) in &linked {
+                match pr_state(*pr, repo).await {
+                    Ok(PrState::Open) => has_open = true,
+                    Ok(PrState::Merged) => has_merged = true,
+                    Ok(PrState::Closed) | Err(_) => {}
+                }
+            }
+            if let Ok(Some(next)) = fleet::reconcile_advance(&t.id, has_open, has_merged).await {
+                out.push_str(&format!("  {}: -> {}\n", t.id, next.as_str()));
+                advanced += 1;
+            }
+            if new_links > 0 || new_parts > 0 {
+                out.push_str(&format!(
+                    "  {}: +{new_links} PR(s), +{new_parts} participant(s)\n",
+                    t.id
+                ));
+            }
+        }
+        if out.is_empty() {
+            out.push_str("(no shared-task changes)\n");
+        }
+        out.push_str(&format!("({advanced} state(s) advanced)\n"));
+        Ok(text(out))
+    }
 }
 
 #[tool_handler]
@@ -1757,6 +1837,15 @@ pub struct SweepAgentPrsRequest {
     )]
     #[serde(default)]
     pub repo: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SweepSharedTasksRequest {
+    #[schemars(
+        description = "Optional shared-task id to reconcile just that one. Omit to reconcile every shared task."
+    )]
+    #[serde(default)]
+    pub id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -2441,6 +2530,45 @@ async fn pr_state(number: u64, repo_slug: &str) -> Result<PrState, McpError> {
         "CLOSED" => PrState::Closed,
         _ => PrState::Open,
     })
+}
+
+/// The PRs GitHub considers will close `issue` in `repo_slug`, via the issue's
+/// `closedByPullRequestsReferences` — the authoritative `Fixes #N` linkage, not
+/// body-parsing. Each entry is `(pr_number, author_login)`. A malformed slug, a
+/// gh error, or unexpected JSON yields an empty list, so one bad ref can never
+/// abort the whole reconcile pass.
+async fn issue_closing_prs(repo_slug: &str, issue: u64) -> Vec<(String, u64, String)> {
+    let Some((owner, name)) = repo_slug.split_once('/') else {
+        return Vec::new();
+    };
+    if owner.is_empty() || name.is_empty() {
+        return Vec::new();
+    }
+    const QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){closedByPullRequestsReferences(first:20,includeClosedPrs:true){nodes{number repository{nameWithOwner} author{login}}}}}}";
+    let q = format!("query={QUERY}");
+    let o = format!("owner={owner}");
+    let nm = format!("name={name}");
+    let num = format!("number={issue}");
+    let json = match run_gh(&["api", "graphql", "-f", &q, "-f", &o, "-f", &nm, "-F", &num]).await {
+        Ok(j) => j,
+        Err(_) => return Vec::new(),
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) else {
+        return Vec::new();
+    };
+    let Some(arr) =
+        v["data"]["repository"]["issue"]["closedByPullRequestsReferences"]["nodes"].as_array()
+    else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|n| {
+            let number = n["number"].as_u64()?;
+            let repo = n["repository"]["nameWithOwner"].as_str()?.to_string();
+            let author = n["author"]["login"].as_str().unwrap_or("").to_string();
+            Some((repo, number, author))
+        })
+        .collect()
 }
 
 /// Extract the PR number from a `pr=#<n>` token in an event's details field.
