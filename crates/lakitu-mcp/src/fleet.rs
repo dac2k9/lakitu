@@ -255,6 +255,9 @@ pub struct TaskEvent {
     pub state: SharedTaskState,
     pub ts: String,
     pub by: String,
+    /// Optional short note — why the move happened (e.g. "merged owner/repo#9").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// A shared task: a team- or fleet-scoped goal that *groups* board issues + PRs
@@ -1159,6 +1162,7 @@ pub async fn create_shared_task(
             state: SharedTaskState::Open,
             ts: now.clone(),
             by: owner,
+            note: None,
         }],
         created: now.clone(),
         updated: now,
@@ -1211,7 +1215,12 @@ pub async fn join_shared_task(id: &str, agent: &str) -> Result<SharedTask> {
 
 /// Move a shared task to a new state, appending a timeline entry (no-op if it is
 /// already in that state). `by` is the agent — or "reconcile" — making the move.
-pub async fn advance_shared_task(id: &str, state: SharedTaskState, by: &str) -> Result<SharedTask> {
+pub async fn advance_shared_task(
+    id: &str,
+    state: SharedTaskState,
+    by: &str,
+    note: Option<&str>,
+) -> Result<SharedTask> {
     let by = sanitize(by);
     let mut st = match read_shared_task(id).await {
         Some(s) => s,
@@ -1224,6 +1233,7 @@ pub async fn advance_shared_task(id: &str, state: SharedTaskState, by: &str) -> 
             state,
             ts: now.clone(),
             by,
+            note: note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
         });
         st.updated = now;
         write_shared_task(&st).await?;
@@ -1240,6 +1250,7 @@ pub async fn reconcile_advance(
     id: &str,
     has_open_pr: bool,
     has_merged_pr: bool,
+    note: Option<&str>,
 ) -> Result<Option<SharedTaskState>> {
     let mut st = match read_shared_task(id).await {
         Some(s) => s,
@@ -1254,6 +1265,7 @@ pub async fn reconcile_advance(
         state: next,
         ts: now.clone(),
         by: "reconcile".to_string(),
+        note: note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
     });
     st.updated = now;
     write_shared_task(&st).await?;
@@ -1496,6 +1508,7 @@ fn shared_task_dto(st: SharedTask) -> crate::wire::SharedTaskDto {
                 state: e.state.as_str().to_string(),
                 ts: e.ts,
                 by: e.by,
+                note: e.note,
             })
             .collect(),
         created: st.created,
@@ -1952,16 +1965,16 @@ mod tests {
         assert_eq!(joined.participants.len(), 2, "re-join is idempotent");
 
         // Advancing appends a transition; same-state advance is a no-op.
-        let adv = advance_shared_task(&st.id, SharedTaskState::Active, "lakitu")
+        let adv = advance_shared_task(&st.id, SharedTaskState::Active, "lakitu", None)
             .await
             .unwrap();
         assert_eq!(adv.state, SharedTaskState::Active);
         assert_eq!(adv.timeline.len(), 2);
-        let adv = advance_shared_task(&st.id, SharedTaskState::Active, "lakitu")
+        let adv = advance_shared_task(&st.id, SharedTaskState::Active, "lakitu", None)
             .await
             .unwrap();
         assert_eq!(adv.timeline.len(), 2, "same-state advance is a no-op");
-        advance_shared_task(&st.id, SharedTaskState::Done, "lakitu")
+        advance_shared_task(&st.id, SharedTaskState::Done, "lakitu", None)
             .await
             .unwrap();
 
@@ -2083,21 +2096,33 @@ mod tests {
             .await
             .unwrap();
 
-        // A merged-PR signal advances open -> in-review, stamped by "reconcile".
-        let moved = reconcile_advance(&st.id, false, true).await.unwrap();
+        // A merged-PR signal advances open -> in-review, stamped by "reconcile" + the note.
+        let moved = reconcile_advance(&st.id, false, true, Some("merged acme/x#9"))
+            .await
+            .unwrap();
         assert_eq!(moved, Some(SharedTaskState::InReview));
         let got = read_shared_task(&st.id).await.unwrap();
         assert_eq!(got.state, SharedTaskState::InReview);
         assert_eq!(got.timeline.last().unwrap().by, "reconcile");
+        assert_eq!(
+            got.timeline.last().unwrap().note.as_deref(),
+            Some("merged acme/x#9")
+        );
 
         // Idempotent: the same signal again => no change.
-        assert_eq!(reconcile_advance(&st.id, false, true).await.unwrap(), None);
+        assert_eq!(
+            reconcile_advance(&st.id, false, true, None).await.unwrap(),
+            None
+        );
 
         // No-override: a human Done is never clobbered by a later reconcile.
-        advance_shared_task(&st.id, SharedTaskState::Done, "dac")
+        advance_shared_task(&st.id, SharedTaskState::Done, "dac", None)
             .await
             .unwrap();
-        assert_eq!(reconcile_advance(&st.id, true, true).await.unwrap(), None);
+        assert_eq!(
+            reconcile_advance(&st.id, true, true, None).await.unwrap(),
+            None
+        );
         assert_eq!(
             read_shared_task(&st.id).await.unwrap().state,
             SharedTaskState::Done,

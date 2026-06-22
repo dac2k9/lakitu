@@ -134,6 +134,8 @@ pub struct TaskEventDto {
     pub ts: String,
     /// Agent (or "reconcile") who made the move.
     pub by: String,
+    /// Optional short note — why the move happened.
+    pub note: Option<String>,
 }
 
 #[derive(Serialize)]
