@@ -1692,6 +1692,7 @@ impl AgentBoardService {
         let tasks = fleet::list_shared_tasks().await;
         let mut out = String::new();
         let mut advanced = 0usize;
+        let mut notified = 0usize;
         for t in &tasks {
             if want.as_ref().is_some_and(|w| &t.id != w) {
                 continue;
@@ -1753,11 +1754,23 @@ impl AgentBoardService {
             }
             let mut open_pr: Option<(String, u64)> = None;
             let mut merged_pr: Option<(String, u64)> = None;
+            // PRs that crossed into "merged" *this* pass — the per-PR merge edge
+            // (prior cached state wasn't already "merged"). We notify on these.
+            let mut newly_merged: Vec<(String, u64)> = Vec::new();
             for (repo, pr) in &linked {
                 if let Some(s) = ref_state(fleet::RefKind::Pr, repo, *pr).await {
                     // Cache the pill for every linked PR (visibility), but only an
-                    // advance-eligible PR (closer / manual link) may move state.
+                    // advance-eligible PR (closer / manual link) may move state or
+                    // fire a merge-notification — a reference-only mention must not.
                     if advance_prs.contains(&(repo.clone(), *pr)) {
+                        let prior = t
+                            .prs
+                            .iter()
+                            .find(|r| &r.repo == repo && r.number == *pr)
+                            .and_then(|r| r.state.as_deref());
+                        if fleet::is_merge_edge(prior, &s) {
+                            newly_merged.push((repo.clone(), *pr));
+                        }
                         match s.as_str() {
                             "open" | "draft" if open_pr.is_none() => {
                                 open_pr = Some((repo.clone(), *pr))
@@ -1788,6 +1801,30 @@ impl AgentBoardService {
                 out.push_str(&format!("  {}: -> {}  ({note})\n", t.id, next.as_str()));
                 advanced += 1;
             }
+            // Notify the agent(s) registered for each just-merged PR's repo
+            // (repo-owner routing; fall back to the task owner if none). The
+            // cached "merged" state written above guards against re-notifying.
+            for (repo, pr) in &newly_merged {
+                let mut targets = fleet::agents_for_repo(repo).await;
+                if targets.is_empty() {
+                    targets.push(t.owner.clone());
+                }
+                let title = format!("PR merged: {repo}#{pr}");
+                let body = format!(
+                    "{repo}#{pr} is merged — it's linked to shared task {} \"{}\". \
+                     You're getting this as the agent registered for {repo}.",
+                    t.id, t.title
+                );
+                for to in &targets {
+                    if fleet::send_message("reconcile", to, &title, &body)
+                        .await
+                        .is_ok()
+                    {
+                        out.push_str(&format!("  {}: notified {to} ({repo}#{pr} merged)\n", t.id));
+                        notified += 1;
+                    }
+                }
+            }
             if new_links > 0 || new_parts > 0 {
                 out.push_str(&format!(
                     "  {}: +{new_links} PR(s), +{new_parts} participant(s)\n",
@@ -1798,7 +1835,9 @@ impl AgentBoardService {
         if out.is_empty() {
             out.push_str("(no shared-task changes)\n");
         }
-        out.push_str(&format!("({advanced} state(s) advanced)\n"));
+        out.push_str(&format!(
+            "({advanced} state(s) advanced, {notified} merge-notification(s) sent)\n"
+        ));
         Ok(text(out))
     }
 }
