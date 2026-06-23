@@ -1788,7 +1788,7 @@ impl AgentBoardService {
                 }
                 let title = format!("PR merged: {repo}#{pr}");
                 let body = format!(
-                    "{repo}#{pr} just merged — it's linked to shared task {} \"{}\". \
+                    "{repo}#{pr} is merged — it's linked to shared task {} \"{}\". \
                      You're getting this as the agent registered for {repo}.",
                     t.id, t.title
                 );
