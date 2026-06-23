@@ -1306,6 +1306,28 @@ pub async fn cache_ref_states(id: &str, states: &[(String, u64, String)]) -> Res
     Ok(())
 }
 
+/// Whether a PR's freshly-observed `fresh` state is a *new* merge — "merged" now
+/// but its previously-cached state wasn't. This is the per-PR merge *edge*: it
+/// lets the sweep fire a one-shot notification exactly once (the next pass sees
+/// the cached "merged" and won't re-fire). Distinct from the task-level
+/// [`SharedTaskState::reconciled_to`], which is monotonic and advances a task once.
+pub fn is_merge_edge(prior: Option<&str>, fresh: &str) -> bool {
+    fresh == "merged" && prior != Some("merged")
+}
+
+/// The agents registered to `repo` — the "owner(s)" of that repo — for routing
+/// repo-scoped notifications (e.g. a merged PR). Excludes the human supervisor;
+/// exact `owner/name` match, so callers fall back (e.g. to a task owner) when empty.
+pub async fn agents_for_repo(repo: &str) -> Vec<String> {
+    list_agents()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| a.kind == "agent" && a.repo == repo)
+        .map(|a| a.name)
+        .collect()
+}
+
 /// List all registered agents with current presence + unread count.
 pub async fn list_agents() -> Result<Vec<AgentSummary>> {
     let agents_dir = store_root().join("agents");
@@ -1721,6 +1743,72 @@ mod tests {
         unsafe {
             std::env::remove_var("LAKITU_FLEET_ROOT");
         }
+    }
+
+    #[test]
+    fn merge_edge_fires_once() {
+        // Fires only on the transition *into* merged.
+        assert!(
+            is_merge_edge(Some("open"), "merged"),
+            "open -> merged fires"
+        );
+        assert!(
+            is_merge_edge(None, "merged"),
+            "newly-linked already-merged PR fires once"
+        );
+        assert!(
+            !is_merge_edge(Some("merged"), "merged"),
+            "already-merged does not re-fire"
+        );
+        assert!(
+            !is_merge_edge(Some("open"), "open"),
+            "still-open never fires"
+        );
+        assert!(
+            !is_merge_edge(Some("draft"), "closed"),
+            "a close is not a merge"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // _env guard intentionally held across .await
+    async fn agents_for_repo_matches_owner() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("fleet-repo-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: TEST_ENV_LOCK serializes the HOME-mutating tests.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("LAKITU_FLEET_ROOT");
+            std::env::remove_var("GENBOT_ROOT");
+        }
+
+        register("link", "fossid-ab/fossid-mcp", "fossid-ab/14", None, None)
+            .await
+            .unwrap();
+        register(
+            "samus",
+            "fossid-ab/fossid-vscode",
+            "fossid-ab/14",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        register_human("dac").await.unwrap();
+
+        assert_eq!(
+            agents_for_repo("fossid-ab/fossid-mcp").await,
+            vec!["link".to_string()],
+            "exact repo match resolves to that agent (human excluded)"
+        );
+        assert!(
+            agents_for_repo("fossid-ab/none").await.is_empty(),
+            "no owner -> empty, so the caller falls back to the task owner"
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[tokio::test]
