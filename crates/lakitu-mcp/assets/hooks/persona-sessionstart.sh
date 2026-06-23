@@ -39,10 +39,10 @@ def sanitize(name):
 #   1) $LAKITU_FLEET_NAME / $GENBOT_NAME if exported (authoritative),
 #   2) else the registry entry whose recorded checkout path == cwd,
 #   3) else the cwd basename.
-def resolve_name():
-    p = os.environ.get("LAKITU_PINNED") or ""
-    if p:
-        return p
+# When >1 registered agent shares this checkout and nothing is pinned, the
+# checkout cannot identify the session — handled by the ambiguity branch below.
+def path_matches():
+    out = []
     try:
         rc = os.path.realpath(cwd)
         for f in os.listdir(agents):
@@ -56,12 +56,32 @@ def resolve_name():
                 continue
             rp = reg.get("path")
             if rp and os.path.realpath(rp) == rc:
-                return reg.get("name") or f[:-5]
+                out.append(reg.get("name") or f[:-5])
     except Exception:
         pass
-    return os.path.basename(cwd) if cwd else ""
+    return out
 
-name = resolve_name()
+pinned = os.environ.get("LAKITU_PINNED") or ""
+if pinned:
+    name = pinned
+else:
+    matches = path_matches()
+    if len(matches) > 1:
+        # Shared checkout, nothing pinned → we cannot tell which agent this is.
+        # Surface it instead of silently resuming as the wrong one.
+        names = ", ".join(sorted(sanitize(m) for m in matches))
+        msg = (
+            "# Lakitu fleet: ambiguous identity (no persona loaded)\n"
+            "This checkout is shared by multiple registered agents (" + names + "), "
+            "and $LAKITU_FLEET_NAME is not set — so this hook cannot tell which one "
+            "this session is. To avoid resuming as the wrong agent, no persona was "
+            "loaded. Fix: set LAKITU_FLEET_NAME=<your name> for this session "
+            "(e.g. via the launcher or .claude/settings) and restart."
+        )
+        sys.stdout.write(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "SessionStart", "additionalContext": msg}}))
+        sys.exit(0)
+    name = matches[0] if matches else (os.path.basename(cwd) if cwd else "")
 if not name:
     sys.exit(0)
 name = sanitize(name)

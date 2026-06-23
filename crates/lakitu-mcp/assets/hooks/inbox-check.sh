@@ -58,6 +58,30 @@ PY
 fi
 [ -n "$name" ] || exit 0
 
+# Guard — never gate idle on an inbox this session doesn't own. If the name was
+# *guessed* (LAKITU_FLEET_NAME unset), suppress the nudge when the registry shows
+# that agent checks out somewhere else: that means we resolved to the cwd-repo's
+# owner (a peer), so blocking would loop this session on the peer's inbox.
+# Uncertain (python missing, no such entry, or no recorded path) → fall through.
+if [ -z "${LAKITU_FLEET_NAME:-${GENBOT_NAME:-}}" ]; then
+  here="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$here" ] || here="$PWD"
+  foreign="$(LAKITU_NAME_CHK="$name" LAKITU_HERE="$here" python3 - <<'PY' 2>/dev/null || true
+import os, json
+name = os.environ.get("LAKITU_NAME_CHK", "")
+here = os.path.realpath(os.environ.get("LAKITU_HERE", "") or ".")
+try:
+    d = json.load(open(os.path.expanduser("~/.claude/lakitu-fleet/agents/" + name + ".json")))
+    p = d.get("path") or ""
+    # Positively foreign only when the registry records a *different* checkout.
+    print("foreign" if p and os.path.realpath(p) != here else "")
+except Exception:
+    print("")
+PY
+)"
+  [ "$foreign" = "foreign" ] && exit 0
+fi
+
 # Remote daemon? Ask it for the unread count and gate on that. Fail-soft:
 # any error → allow the stop (exit 0).
 SERVER="${LAKITU_FLEET_SERVER:-}"
