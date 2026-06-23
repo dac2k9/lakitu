@@ -1699,6 +1699,14 @@ impl AgentBoardService {
             // Links we already have; discover more from each linked issue.
             let mut linked: std::collections::HashSet<(String, u64)> =
                 t.prs.iter().map(|r| (r.repo.clone(), r.number)).collect();
+            // PRs allowed to drive the state advance: pre-existing/manual links +
+            // closers (the authoritative "does the work" set). Auto-discovered
+            // reference-only PRs LINK (for visibility) but must not move task
+            // state — a referencer is any PR that *mentions* the issue, not one
+            // that does its work, so a tangential merged mention shouldn't advance
+            // the goal.
+            let mut advance_prs: std::collections::HashSet<(String, u64)> =
+                t.prs.iter().map(|r| (r.repo.clone(), r.number)).collect();
             let mut joined: std::collections::HashSet<String> =
                 t.participants.iter().cloned().collect();
             let mut new_links = 0usize;
@@ -1707,12 +1715,15 @@ impl AgentBoardService {
                 if issue.repo.split_once('/').is_none() {
                     continue; // malformed ref — skip so one bad ref can't abort the pass
                 }
-                // Closers (home-repo, Fixes #N) + cross-repo PRs that *reference*
-                // the goal-issue — the close-based query misses out-of-repo
-                // contributors, since GitHub can't auto-close across repos.
-                let mut discovered = issue_closing_prs(&issue.repo, issue.number).await;
-                discovered.extend(issue_referencing_prs(&issue.repo, issue.number).await);
-                for (pr_repo, pr, author) in discovered {
+                // Closers (home-repo, Fixes #N) are authoritative — they drive
+                // state. Cross-repo PRs that only *reference* the goal-issue are
+                // discovered too (the close query misses out-of-repo contributors,
+                // since GitHub can't auto-close across repos) but link for
+                // visibility only — they're kept out of advance_prs above.
+                let closers = issue_closing_prs(&issue.repo, issue.number).await;
+                let referencers = issue_referencing_prs(&issue.repo, issue.number).await;
+                advance_prs.extend(closers.iter().map(|(r, n, _)| (r.clone(), *n)));
+                for (pr_repo, pr, author) in closers.into_iter().chain(referencers) {
                     let key = (pr_repo.clone(), pr);
                     if !linked.contains(&key)
                         && fleet::link_shared_task(&t.id, fleet::RefKind::Pr, &pr_repo, pr)
@@ -1744,12 +1755,18 @@ impl AgentBoardService {
             let mut merged_pr: Option<(String, u64)> = None;
             for (repo, pr) in &linked {
                 if let Some(s) = ref_state(fleet::RefKind::Pr, repo, *pr).await {
-                    match s.as_str() {
-                        "open" | "draft" if open_pr.is_none() => {
-                            open_pr = Some((repo.clone(), *pr))
+                    // Cache the pill for every linked PR (visibility), but only an
+                    // advance-eligible PR (closer / manual link) may move state.
+                    if advance_prs.contains(&(repo.clone(), *pr)) {
+                        match s.as_str() {
+                            "open" | "draft" if open_pr.is_none() => {
+                                open_pr = Some((repo.clone(), *pr))
+                            }
+                            "merged" if merged_pr.is_none() => {
+                                merged_pr = Some((repo.clone(), *pr))
+                            }
+                            _ => {}
                         }
-                        "merged" if merged_pr.is_none() => merged_pr = Some((repo.clone(), *pr)),
-                        _ => {}
                     }
                     states.push((repo.clone(), *pr, s));
                 }
