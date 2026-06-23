@@ -68,7 +68,10 @@ if [ -z "${LAKITU_FLEET_NAME:-${GENBOT_NAME:-}}" ]; then
   [ -n "$here" ] || here="$PWD"
   foreign="$(LAKITU_NAME_CHK="$name" LAKITU_HERE="$here" python3 - <<'PY' 2>/dev/null || true
 import os, json
-name = os.environ.get("LAKITU_NAME_CHK", "")
+def sanitize(n):
+    out = "".join(c if (c.isalnum() and ord(c) < 128) or c in "._-" else "-" for c in n)
+    return out.strip(".") or "unnamed"
+name = sanitize(os.environ.get("LAKITU_NAME_CHK", ""))
 here = os.path.realpath(os.environ.get("LAKITU_HERE", "") or ".")
 try:
     d = json.load(open(os.path.expanduser("~/.claude/lakitu-fleet/agents/" + name + ".json")))

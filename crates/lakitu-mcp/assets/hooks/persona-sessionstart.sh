@@ -65,11 +65,13 @@ pinned = os.environ.get("LAKITU_PINNED") or ""
 if pinned:
     name = pinned
 else:
-    matches = path_matches()
+    # Dedup by sanitized name so a duplicate registry entry for one agent
+    # cannot trip false ambiguity.
+    matches = sorted(set(sanitize(m) for m in path_matches()))
     if len(matches) > 1:
         # Shared checkout, nothing pinned → we cannot tell which agent this is.
         # Surface it instead of silently resuming as the wrong one.
-        names = ", ".join(sorted(sanitize(m) for m in matches))
+        names = ", ".join(matches)
         msg = (
             "# Lakitu fleet: ambiguous identity (no persona loaded)\n"
             "This checkout is shared by multiple registered agents (" + names + "), "
