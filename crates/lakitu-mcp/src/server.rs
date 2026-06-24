@@ -1276,11 +1276,12 @@ impl AgentBoardService {
         description = "List all registered agents in the fleet store with their current \
         state (idle/working/blocked/unknown), repo, board, current task, and unread-message \
         count. Use this for awareness of which peers exist and what they're doing before \
-        sending a message."
+        sending a message. Compact by default (route by `role`); pass `verbose=true` only when \
+        you need each agent's full capability blurb."
     )]
     async fn list_agents(
         &self,
-        Parameters(_req): Parameters<ListAgentsRequest>,
+        Parameters(req): Parameters<ListAgentsRequest>,
     ) -> Result<CallToolResult, McpError> {
         let agents = fleet::list_agents().await.map_err(mcp)?;
         if agents.is_empty() {
@@ -1288,19 +1289,8 @@ impl AgentBoardService {
         }
         let mut out = String::new();
         for a in &agents {
-            out.push_str(&format!(
-                "{name}  kind={kind}{role}  state={state}  repo={repo}  board={board}  unread={unread}{help}{seen}{task}\n",
-                name = a.name,
-                kind = a.kind,
-                role = a.role.as_ref().map(|r| format!("  role=\"{r}\"")).unwrap_or_default(),
-                state = a.state,
-                repo = a.repo,
-                board = a.board,
-                unread = a.unread,
-                help = a.description.as_ref().map(|d| format!("  helps=\"{d}\"")).unwrap_or_default(),
-                seen = a.last_seen.as_ref().map(|s| format!("  seen={s}")).unwrap_or_default(),
-                task = a.task.as_ref().map(|t| format!("  task={t}")).unwrap_or_default(),
-            ));
+            out.push_str(&format_agent_row(a, req.verbose));
+            out.push('\n');
         }
         Ok(text(out))
     }
@@ -2118,7 +2108,15 @@ pub struct NotifySupervisorRequest {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ListAgentsRequest {}
+pub struct ListAgentsRequest {
+    #[schemars(
+        description = "Include each agent's full capability blurb (the `helps=` description). \
+        Default false → a compact roster (name · role · state · repo · board · unread + \
+        seen/task), enough to route by role; pass true only when you need the full descriptions."
+    )]
+    #[serde(default)]
+    pub verbose: bool,
+}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SetIdentityRequest {
@@ -2778,6 +2776,45 @@ fn parse_referencing_prs(json: &str) -> Vec<(String, u64, String)> {
         .collect()
 }
 
+/// Render one `list_agents` row. Compact by default (name · role · state · repo
+/// · board · unread + seen/task); `verbose` adds the full `helps=` capability
+/// blurb. The blurb is the bulk of the row's bytes and is redundant with `role`
+/// for routing, so omitting it by default keeps the common awareness call lean.
+fn format_agent_row(a: &fleet::AgentSummary, verbose: bool) -> String {
+    let role = a
+        .role
+        .as_ref()
+        .map(|r| format!("  role=\"{r}\""))
+        .unwrap_or_default();
+    let help = if verbose {
+        a.description
+            .as_ref()
+            .map(|d| format!("  helps=\"{d}\""))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let seen = a
+        .last_seen
+        .as_ref()
+        .map(|s| format!("  seen={s}"))
+        .unwrap_or_default();
+    let task = a
+        .task
+        .as_ref()
+        .map(|t| format!("  task={t}"))
+        .unwrap_or_default();
+    format!(
+        "{name}  kind={kind}{role}  state={state}  repo={repo}  board={board}  unread={unread}{help}{seen}{task}",
+        name = a.name,
+        kind = a.kind,
+        state = a.state,
+        repo = a.repo,
+        board = a.board,
+        unread = a.unread,
+    )
+}
+
 /// Extract the PR number from a `pr=#<n>` token in an event's details field.
 fn parse_pr_ref(details: &str) -> Option<u64> {
     let idx = details.find("pr=#")?;
@@ -2961,5 +2998,39 @@ mod tests {
         // Fail-soft: bad / empty JSON → no refs (never aborts the sweep).
         assert!(parse_referencing_prs("not json").is_empty());
         assert!(parse_referencing_prs("{}").is_empty());
+    }
+
+    #[test]
+    fn format_agent_row_omits_blurb_unless_verbose() {
+        let a = fleet::AgentSummary {
+            name: "link".into(),
+            kind: "agent".into(),
+            repo: "fossid-ab/fossid-mcp".into(),
+            board: "fossid-ab/14".into(),
+            role: Some("scan backend".into()),
+            description: Some("a long capability blurb that costs tokens".into()),
+            state: "idle".into(),
+            task: Some("issue #90".into()),
+            last_seen: Some("2026-06-24T14:00:00+02:00".into()),
+            unread: 2,
+        };
+        let compact = format_agent_row(&a, false);
+        assert!(
+            !compact.contains("helps="),
+            "compact omits the capability blurb"
+        );
+        assert!(
+            compact.contains("role=\"scan backend\""),
+            "compact keeps role (the router)"
+        );
+        assert!(
+            compact.contains("unread=2") && compact.contains("task=issue #90"),
+            "compact keeps the awareness fields"
+        );
+        let verbose = format_agent_row(&a, true);
+        assert!(
+            verbose.contains("helps=\"a long capability blurb that costs tokens\""),
+            "verbose includes the blurb"
+        );
     }
 }
