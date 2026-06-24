@@ -58,31 +58,51 @@ PY
 fi
 [ -n "$name" ] || exit 0
 
-# Guard — never gate idle on an inbox this session doesn't own. If the name was
-# *guessed* (LAKITU_FLEET_NAME unset), suppress the nudge when the registry shows
-# that agent checks out somewhere else: that means we resolved to the cwd-repo's
-# owner (a peer), so blocking would loop this session on the peer's inbox.
-# Uncertain (python missing, no such entry, or no recorded path) → fall through.
+# Guard — never gate idle on an inbox this session does not own. When the name
+# was *guessed* (LAKITU_FLEET_NAME unset), suppress the nudge if we cannot be sure
+# the resolved agent IS this session:
+#   - ambiguous: >1 registered agent shares this checkout's repo short-name, so
+#     the cwd cannot say which one we are (a session run in a shared repo); or
+#   - foreign: the resolved agent's registry path is a *different* checkout (we
+#     resolved to the cwd-repo's owner, a peer).
+# Either way blocking would loop this session on a peer's inbox. Uncertain
+# (python missing, no entry, no recorded path) → fall through and nudge.
 if [ -z "${LAKITU_FLEET_NAME:-${GENBOT_NAME:-}}" ]; then
   here="$(git rev-parse --show-toplevel 2>/dev/null || true)"
   [ -n "$here" ] || here="$PWD"
-  foreign="$(LAKITU_NAME_CHK="$name" LAKITU_HERE="$here" python3 - <<'PY' 2>/dev/null || true
-import os, json
+  suppress="$(LAKITU_NAME_CHK="$name" LAKITU_SHORT_CHK="$short" LAKITU_HERE="$here" python3 - <<'PY' 2>/dev/null || true
+import os, json, glob
 def sanitize(n):
     out = "".join(c if (c.isalnum() and ord(c) < 128) or c in "._-" else "-" for c in n)
     return out.strip(".") or "unnamed"
 name = sanitize(os.environ.get("LAKITU_NAME_CHK", ""))
+short = os.environ.get("LAKITU_SHORT_CHK", "")
 here = os.path.realpath(os.environ.get("LAKITU_HERE", "") or ".")
-try:
-    d = json.load(open(os.path.expanduser("~/.claude/lakitu-fleet/agents/" + name + ".json")))
-    p = d.get("path") or ""
-    # Positively foreign only when the registry records a *different* checkout.
-    print("foreign" if p and os.path.realpath(p) != here else "")
-except Exception:
-    print("")
+agents = os.path.expanduser("~/.claude/lakitu-fleet/agents")
+# Ambiguous: more than one agent registered for this repo short-name.
+matches = 0
+for f in glob.glob(os.path.join(agents, "*.json")):
+    if f.endswith((".heartbeat.json", ".wake.json", ".context.json")):
+        continue
+    try:
+        d = json.load(open(f))
+    except Exception:
+        continue
+    if (d.get("repo") or "").rsplit("/", 1)[-1] == short:
+        matches += 1
+if short and matches > 1:
+    print("suppress")
+else:
+    # Foreign: the resolved agent checks out somewhere other than here.
+    try:
+        d = json.load(open(os.path.join(agents, name + ".json")))
+        p = d.get("path") or ""
+        print("suppress" if p and os.path.realpath(p) != here else "")
+    except Exception:
+        print("")
 PY
 )"
-  [ "$foreign" = "foreign" ] && exit 0
+  [ "$suppress" = "suppress" ] && exit 0
 fi
 
 # Remote daemon? Ask it for the unread count and gate on that. Fail-soft:
