@@ -1700,6 +1700,14 @@ impl AgentBoardService {
             // Links we already have; discover more from each linked issue.
             let mut linked: std::collections::HashSet<(String, u64)> =
                 t.prs.iter().map(|r| (r.repo.clone(), r.number)).collect();
+            // PRs allowed to drive the state advance: pre-existing/manual links +
+            // closers (the authoritative "does the work" set). Auto-discovered
+            // reference-only PRs LINK (for visibility) but must not move task
+            // state — a referencer is any PR that *mentions* the issue, not one
+            // that does its work, so a tangential merged mention shouldn't advance
+            // the goal.
+            let mut advance_prs: std::collections::HashSet<(String, u64)> =
+                t.prs.iter().map(|r| (r.repo.clone(), r.number)).collect();
             let mut joined: std::collections::HashSet<String> =
                 t.participants.iter().cloned().collect();
             let mut new_links = 0usize;
@@ -1708,7 +1716,15 @@ impl AgentBoardService {
                 if issue.repo.split_once('/').is_none() {
                     continue; // malformed ref — skip so one bad ref can't abort the pass
                 }
-                for (pr_repo, pr, author) in issue_closing_prs(&issue.repo, issue.number).await {
+                // Closers (home-repo, Fixes #N) are authoritative — they drive
+                // state. Cross-repo PRs that only *reference* the goal-issue are
+                // discovered too (the close query misses out-of-repo contributors,
+                // since GitHub can't auto-close across repos) but link for
+                // visibility only — they're kept out of advance_prs above.
+                let closers = issue_closing_prs(&issue.repo, issue.number).await;
+                let referencers = issue_referencing_prs(&issue.repo, issue.number).await;
+                advance_prs.extend(closers.iter().map(|(r, n, _)| (r.clone(), *n)));
+                for (pr_repo, pr, author) in closers.into_iter().chain(referencers) {
                     let key = (pr_repo.clone(), pr);
                     if !linked.contains(&key)
                         && fleet::link_shared_task(&t.id, fleet::RefKind::Pr, &pr_repo, pr)
@@ -1743,20 +1759,27 @@ impl AgentBoardService {
             let mut newly_merged: Vec<(String, u64)> = Vec::new();
             for (repo, pr) in &linked {
                 if let Some(s) = ref_state(fleet::RefKind::Pr, repo, *pr).await {
-                    let prior = t
-                        .prs
-                        .iter()
-                        .find(|r| &r.repo == repo && r.number == *pr)
-                        .and_then(|r| r.state.as_deref());
-                    if fleet::is_merge_edge(prior, &s) {
-                        newly_merged.push((repo.clone(), *pr));
-                    }
-                    match s.as_str() {
-                        "open" | "draft" if open_pr.is_none() => {
-                            open_pr = Some((repo.clone(), *pr))
+                    // Cache the pill for every linked PR (visibility), but only an
+                    // advance-eligible PR (closer / manual link) may move state or
+                    // fire a merge-notification — a reference-only mention must not.
+                    if advance_prs.contains(&(repo.clone(), *pr)) {
+                        let prior = t
+                            .prs
+                            .iter()
+                            .find(|r| &r.repo == repo && r.number == *pr)
+                            .and_then(|r| r.state.as_deref());
+                        if fleet::is_merge_edge(prior, &s) {
+                            newly_merged.push((repo.clone(), *pr));
                         }
-                        "merged" if merged_pr.is_none() => merged_pr = Some((repo.clone(), *pr)),
-                        _ => {}
+                        match s.as_str() {
+                            "open" | "draft" if open_pr.is_none() => {
+                                open_pr = Some((repo.clone(), *pr))
+                            }
+                            "merged" if merged_pr.is_none() => {
+                                merged_pr = Some((repo.clone(), *pr))
+                            }
+                            _ => {}
+                        }
                     }
                     states.push((repo.clone(), *pr, s));
                 }
@@ -2703,6 +2726,58 @@ async fn issue_closing_prs(repo_slug: &str, issue: u64) -> Vec<(String, u64, Str
         .collect()
 }
 
+/// PRs that *reference* `issue` in `repo_slug` from any repo — read off the
+/// issue's cross-reference timeline. Complements `issue_closing_prs`: a
+/// cross-repo contributor can't GitHub-auto-close the goal-issue, so it never
+/// shows up as a closer, but it does cross-reference it. Keeps only open/merged
+/// PR sources (drops non-PR refs + abandoned, closed-unmerged PRs). Same
+/// fail-soft contract: any error → empty list.
+async fn issue_referencing_prs(repo_slug: &str, issue: u64) -> Vec<(String, u64, String)> {
+    let Some((owner, name)) = repo_slug.split_once('/') else {
+        return Vec::new();
+    };
+    if owner.is_empty() || name.is_empty() {
+        return Vec::new();
+    }
+    const QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){timelineItems(itemTypes:[CROSS_REFERENCED_EVENT],first:100){nodes{... on CrossReferencedEvent{source{... on PullRequest{number state repository{nameWithOwner} author{login}}}}}}}}}";
+    let q = format!("query={QUERY}");
+    let o = format!("owner={owner}");
+    let nm = format!("name={name}");
+    let num = format!("number={issue}");
+    let json = match run_gh(&["api", "graphql", "-f", &q, "-f", &o, "-f", &nm, "-F", &num]).await {
+        Ok(j) => j,
+        Err(_) => return Vec::new(),
+    };
+    parse_referencing_prs(&json)
+}
+
+/// Pure parser for `issue_referencing_prs`' GraphQL response: pull the
+/// cross-referenced PR sources (open or merged) as `(repo, number, author)`.
+/// Non-PR sources and closed-unmerged PRs are dropped. Split out so it is
+/// unit-testable without a live `gh`.
+fn parse_referencing_prs(json: &str) -> Vec<(String, u64, String)> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let Some(nodes) = v["data"]["repository"]["issue"]["timelineItems"]["nodes"].as_array() else {
+        return Vec::new();
+    };
+    nodes
+        .iter()
+        .filter_map(|n| {
+            let src = &n["source"];
+            // PR sources populate the inline fragment; non-PR refs (issues) don't.
+            let number = src["number"].as_u64()?;
+            if !matches!(src["state"].as_str(), Some("OPEN") | Some("MERGED")) {
+                return None; // skip closed-unmerged + anything unexpected
+            }
+            let repo = src["repository"]["nameWithOwner"].as_str()?.to_string();
+            let author = src["author"]["login"].as_str().unwrap_or("").to_string();
+            Some((repo, number, author))
+        })
+        .collect()
+}
+
 /// Extract the PR number from a `pr=#<n>` token in an event's details field.
 fn parse_pr_ref(details: &str) -> Option<u64> {
     let idx = details.find("pr=#")?;
@@ -2861,5 +2936,30 @@ mod tests {
         assert_eq!(parse_pr_ref("issue=#90 reason=release-gate"), None);
         assert_eq!(parse_pr_ref("note=lakitu-mcp wired in"), None);
         assert_eq!(parse_pr_ref(""), None);
+    }
+
+    #[test]
+    fn parse_referencing_prs_keeps_open_merged_cross_repo() {
+        let json = r#"{"data":{"repository":{"issue":{"timelineItems":{"nodes":[
+            {"source":{"number":349,"state":"OPEN","repository":{"nameWithOwner":"fossid-ab/fossid-toolbox"},"author":{"login":"rush"}}},
+            {"source":{"number":76,"state":"MERGED","repository":{"nameWithOwner":"fossid-ab/fossid-mcp"},"author":{"login":"link"}}},
+            {"source":{"number":12,"state":"CLOSED","repository":{"nameWithOwner":"fossid-ab/x"},"author":{"login":"abandoned"}}},
+            {"source":{}}
+        ]}}}}}"#;
+        assert_eq!(
+            parse_referencing_prs(json),
+            vec![
+                (
+                    "fossid-ab/fossid-toolbox".to_string(),
+                    349,
+                    "rush".to_string()
+                ),
+                ("fossid-ab/fossid-mcp".to_string(), 76, "link".to_string()),
+            ],
+            "open + merged cross-repo PR refs kept; closed-unmerged + non-PR source dropped"
+        );
+        // Fail-soft: bad / empty JSON → no refs (never aborts the sweep).
+        assert!(parse_referencing_prs("not json").is_empty());
+        assert!(parse_referencing_prs("{}").is_empty());
     }
 }
