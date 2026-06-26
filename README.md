@@ -36,7 +36,9 @@ a shared on-disk store; the cockpit renders it live.
 
 - **`lakitu`** — the cockpit TUI (the supervisor's view).
 - **`lakitu-mcp`** — the MCP server agents talk to; also runs as an HTTP
-  **daemon** (`lakitu-mcp serve`) so a fleet can span machines.
+  **daemon** (`lakitu-mcp serve`) so a fleet can span machines. On a loopback
+  bind, `serve` also hosts a **read-only web cockpit** at
+  `http://127.0.0.1:<port>/` — the fleet view + shared tasks in a browser.
 - **fleet hooks** — small shell hooks wired into Claude Code's lifecycle that
   report presence, wake idle agents on new mail, inject personas + open tasks at
   session start, and feed the usage chip.
