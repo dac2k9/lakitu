@@ -11,7 +11,9 @@ cargo install lakitu-mcp
 ```
 
 - **stdio mode** (default): a per-agent MCP server (point your `.mcp.json` at it).
-- **`lakitu-mcp serve`**: an HTTP daemon so a fleet can span machines.
+- **`lakitu-mcp serve`**: an HTTP daemon so a fleet can span machines — and, on a
+  loopback bind, a **read-only web cockpit** at `http://127.0.0.1:<port>/` (the
+  fleet view + shared tasks in a browser).
 
 See the [project README](https://github.com/dac2k9/lakitu#readme) for setup and
 the fleet hooks.

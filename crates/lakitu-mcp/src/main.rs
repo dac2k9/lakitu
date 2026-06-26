@@ -26,6 +26,7 @@ mod install;
 mod persona;
 mod rest;
 mod server;
+mod web;
 mod wire;
 
 use std::fs::OpenOptions;
