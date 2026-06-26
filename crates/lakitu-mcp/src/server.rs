@@ -1625,6 +1625,23 @@ impl AgentBoardService {
     }
 
     #[tool(
+        name = "archive_shared_task",
+        description = "Archive a finished shared task — the cockpit's ✕-to-close. Sets an \
+        `archived` flag (kept as history, not deleted) and drops it from the snapshot + default \
+        listings; the state is unchanged. Idempotent. Retrieve archived tasks with \
+        list_shared_tasks(include_archived=true)."
+    )]
+    async fn archive_shared_task(
+        &self,
+        Parameters(req): Parameters<ArchiveSharedTaskRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let st = fleet::archive_shared_task(&req.id, &req.by)
+            .await
+            .map_err(mcp)?;
+        Ok(text(format!("Shared task {id} archived.", id = st.id)))
+    }
+
+    #[tool(
         name = "list_shared_tasks",
         description = "List SHARED tasks (team/fleet goals). Pass your `name` to see only the ones \
         you're a participant in; omit it to list all. Each row shows the id, state, scope, title, \
@@ -1635,10 +1652,12 @@ impl AgentBoardService {
         Parameters(req): Parameters<ListSharedTasksRequest>,
     ) -> Result<CallToolResult, McpError> {
         let include_done = req.include_done.unwrap_or(false);
+        let include_archived = req.include_archived.unwrap_or(false);
         let me = req.name.as_ref().map(|n| fleet::sanitize(n));
         let all = fleet::list_shared_tasks().await;
         let shown: Vec<&fleet::SharedTask> = all
             .iter()
+            .filter(|t| include_archived || !t.archived)
             .filter(|t| include_done || t.state != fleet::SharedTaskState::Done)
             .filter(|t| match &me {
                 Some(n) => t.participants.iter().any(|p| p == n),
@@ -1686,6 +1705,9 @@ impl AgentBoardService {
         for t in &tasks {
             if want.as_ref().is_some_and(|w| &t.id != w) {
                 continue;
+            }
+            if t.archived {
+                continue; // archived = put away; not reconciled
             }
             // Links we already have; discover more from each linked issue.
             let mut linked: std::collections::HashSet<(String, u64)> =
@@ -2266,6 +2288,14 @@ pub struct AdvanceSharedTaskRequest {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ArchiveSharedTaskRequest {
+    #[schemars(description = "Your own agent name — recorded in the timeline as who archived it.")]
+    pub by: String,
+    #[schemars(description = "The shared task id to archive.")]
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListSharedTasksRequest {
     #[schemars(
         description = "Optional: your agent name, to show only shared tasks you're a participant in. Omit to list all."
@@ -2275,6 +2305,11 @@ pub struct ListSharedTasksRequest {
     #[schemars(description = "If true, include done tasks too. Default false (hides completed).")]
     #[serde(default)]
     pub include_done: Option<bool>,
+    #[schemars(
+        description = "If true, include archived tasks too. Default false (archived are hidden)."
+    )]
+    #[serde(default)]
+    pub include_archived: Option<bool>,
 }
 
 /// Declared agent state. Lowercase on the wire to match the heartbeat

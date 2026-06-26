@@ -50,6 +50,7 @@ pub fn router() -> Router {
         .route("/v1/projects/membership", put(set_membership))
         .route("/v1/agents/{name}", delete(disconnect))
         .route("/v1/agents/{name}/icon", get(icon))
+        .route("/v1/shared-tasks/{id}/archive", post(archive_shared_task))
 }
 
 // ---- Reads -----------------------------------------------------------------
@@ -172,6 +173,20 @@ async fn task_drop(Path((name, id)): Path<(String, String)>) -> StatusCode {
     match fleet::drop_task(&name, &id).await {
         Ok(true) => StatusCode::NO_CONTENT,
         Ok(false) => StatusCode::NOT_FOUND,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+#[derive(Deserialize)]
+struct ArchiveReq {
+    by: String,
+}
+
+/// Archive a shared task (remote cockpit / web ✕-to-close). Idempotent. A bad id
+/// or IO error → 500; the web reloads the snapshot on failure either way.
+async fn archive_shared_task(Path(id): Path<String>, Json(req): Json<ArchiveReq>) -> StatusCode {
+    match fleet::archive_shared_task(&id, &req.by).await {
+        Ok(_) => StatusCode::NO_CONTENT,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
