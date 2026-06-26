@@ -12,7 +12,7 @@
 
 use axum::{
     Router,
-    extract::{Path, Request},
+    extract::{Path, Query, Request},
     http::{StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -81,10 +81,13 @@ async fn index() -> Html<String> {
 
 /// The htmx-polled fragment for a tab's view (`fleet`, `tasks`, …) — swaps and
 /// self-polls the `#view` region.
-async fn view_partial(Path(tab): Path<String>) -> Html<String> {
+async fn view_partial(
+    Path(tab): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Html<String> {
     let snap = crate::fleet::snapshot().await;
     let view = match tab.as_str() {
-        "tasks" => tasks_fragment(&snap),
+        "tasks" => tasks_fragment(&snap, q.get("show_done").is_some_and(|v| v == "1")),
         _ => live(&snap),
     };
     Html(view.into_string())
@@ -208,41 +211,74 @@ fn asset(ct: &'static str, body: &'static str) -> impl IntoResponse {
 
 /// The "tasks" tab — a fleet-wide view of every shared task: a card per
 /// `SharedTask` with its scope, participants, linked issues/PRs, and a
-/// Start→Goal timeline. Live like the Fleet board (self-polls `#view`) so a
-/// reconcile pass that advances a task surfaces without a manual refresh — but
-/// at a calmer 5s, since shared tasks move on GitHub-sync cadence, not the
-/// second-by-second pulse of agent state.
-fn tasks_fragment(snap: &SnapshotDto) -> Markup {
-    // Urgency-sort: what needs attention first, finished last; ties broken by
-    // most-recently-updated (RFC3339 sorts chronologically as plain strings).
-    let mut tasks: Vec<&SharedTaskDto> = snap.shared_tasks.iter().collect();
+/// Start→Goal timeline. Live like the Fleet board (self-polls `#view`) at a
+/// calmer 5s, since shared tasks move on GitHub-sync cadence. Done tasks are
+/// hidden by default (mirrors the TUI's `include_done=false`) so the board
+/// stays on live work; `show_done` reveals them and is preserved across polls.
+fn tasks_fragment(snap: &SnapshotDto, show_done: bool) -> Markup {
+    // Counts span ALL shared tasks, so the "done" vital stays honest even when
+    // the done cards are hidden.
+    let count = |s: &str| snap.shared_tasks.iter().filter(|t| t.state == s).count();
+    let done_total = count("done");
+
+    // Drop done unless asked; then urgency-sort (attention first, ties broken by
+    // most-recently-updated — RFC3339 sorts chronologically as plain strings).
+    let mut tasks: Vec<&SharedTaskDto> = snap
+        .shared_tasks
+        .iter()
+        .filter(|t| show_done || t.state != "done")
+        .collect();
     tasks.sort_by(|a, b| {
         task_urgency(&a.state)
             .cmp(&task_urgency(&b.state))
             .then_with(|| b.updated.cmp(&a.updated))
     });
-    let count = |s: &str| tasks.iter().filter(|t| t.state == s).count();
+
+    // The self-poll carries the toggle so a refresh doesn't reset it.
+    let poll_url = if show_done {
+        "/partial/view/tasks?show_done=1"
+    } else {
+        "/partial/view/tasks"
+    };
 
     html! {
-        main id="view" class="live tasks" hx-get="/partial/view/tasks" hx-trigger="every 5s" hx-swap="outerHTML" {
+        main id="view" class="live tasks" hx-get=(poll_url) hx-trigger="every 5s" hx-swap="outerHTML" {
             section class="telemetry" {
                 div class="vitals" {
-                    (vital("shared", tasks.len(), "v-on"))
+                    (vital("shared", snap.shared_tasks.len(), "v-on"))
                     (vital("active", count("active"), "v-work"))
                     (vital("in review", count("in-review"), "v-rev"))
                     (vital("blocked", count("blocked"), "v-block"))
-                    (vital("done", count("done"), "v-done"))
+                    (vital("done", done_total, "v-done"))
+                }
+                @if done_total > 0 {
+                    @if show_done {
+                        button class="done-toggle" hx-get="/partial/view/tasks" hx-target="#view" hx-swap="outerHTML" { "hide done" }
+                    } @else {
+                        button class="done-toggle" hx-get="/partial/view/tasks?show_done=1" hx-target="#view" hx-swap="outerHTML" { "show done (" (done_total) ")" }
+                    }
                 }
             }
 
             @if tasks.is_empty() {
-                div class="coming-soon" {
-                    div class="cs-glyph" { "◷" }
-                    div class="cs-title" { "No shared tasks yet" }
-                    div class="cs-sub" {
-                        "A shared task groups issues + PRs across the fleet toward one goal. "
-                        "Create one with " code { "create_shared_task" }
-                        " — it self-populates and self-advances as PRs land on GitHub."
+                @if snap.shared_tasks.is_empty() {
+                    div class="coming-soon" {
+                        div class="cs-glyph" { "◷" }
+                        div class="cs-title" { "No shared tasks yet" }
+                        div class="cs-sub" {
+                            "A shared task groups issues + PRs across the fleet toward one goal. "
+                            "Create one with " code { "create_shared_task" }
+                            " — it self-populates and self-advances as PRs land on GitHub."
+                        }
+                    }
+                } @else {
+                    div class="coming-soon" {
+                        div class="cs-glyph" { "✓" }
+                        div class="cs-title" { "All clear" }
+                        div class="cs-sub" {
+                            "All " (done_total) " shared task" @if done_total != 1 { "s" } " done. "
+                            button class="done-toggle inline" hx-get="/partial/view/tasks?show_done=1" hx-target="#view" hx-swap="outerHTML" { "show done" }
+                        }
                     }
                 }
             } @else {

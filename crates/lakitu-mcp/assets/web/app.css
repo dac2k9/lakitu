@@ -333,6 +333,16 @@ html { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--haze) 38
 .v-rev .vital-n { color: var(--hold); }
 .v-done .vital-n { color: var(--faint); }
 
+/* show/hide-done toggle (done tasks are hidden by default) */
+.done-toggle {
+  margin-left: auto; align-self: center; cursor: pointer;
+  font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.08em;
+  color: var(--haze); background: var(--panel-2);
+  border: 1px solid var(--edge); border-radius: 999px; padding: 3px 12px;
+}
+.done-toggle:hover { color: var(--cloud); border-color: #34507a; }
+.done-toggle.inline { margin-left: 0; vertical-align: baseline; }
+
 .tgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; }
 .tcard {
   display: flex; flex-direction: column; gap: 10px;
