@@ -1784,27 +1784,21 @@ mod tests {
             std::env::remove_var("GENBOT_ROOT");
         }
 
-        register("link", "fossid-ab/fossid-mcp", "fossid-ab/14", None, None)
+        register("alice", "acme/api", "acme/14", None, None)
             .await
             .unwrap();
-        register(
-            "samus",
-            "fossid-ab/fossid-vscode",
-            "fossid-ab/14",
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        register_human("dac").await.unwrap();
+        register("bob", "acme/web", "acme/14", None, None)
+            .await
+            .unwrap();
+        register_human("dana").await.unwrap();
 
         assert_eq!(
-            agents_for_repo("fossid-ab/fossid-mcp").await,
-            vec!["link".to_string()],
+            agents_for_repo("acme/api").await,
+            vec!["alice".to_string()],
             "exact repo match resolves to that agent (human excluded)"
         );
         assert!(
-            agents_for_repo("fossid-ab/none").await.is_empty(),
+            agents_for_repo("acme/none").await.is_empty(),
             "no owner -> empty, so the caller falls back to the task owner"
         );
 
@@ -1952,10 +1946,10 @@ mod tests {
         assert!(read_tasks("aria").await.is_empty());
 
         // Add a loose task and a PR-linked one (with a body + message provenance).
-        let t1 = add_task("aria", "  reply to samus  ", None, None, None)
+        let t1 = add_task("aria", "  reply to bob  ", None, None, None)
             .await
             .unwrap();
-        assert_eq!(t1.text, "reply to samus", "text is trimmed");
+        assert_eq!(t1.text, "reply to bob", "text is trimmed");
         assert_eq!(t1.id.len(), 6);
         assert!(t1.body.is_none());
         let t2 = add_task(
@@ -2058,11 +2052,11 @@ mod tests {
             "Ship the web UI",
             None,
             TaskScope::Team,
-            Some("  dac2k9/1  ".into()),
+            Some("  acme/1  ".into()),
         )
         .await
         .unwrap();
-        assert_eq!(team.team.as_deref(), Some("dac2k9/1"), "team trimmed");
+        assert_eq!(team.team.as_deref(), Some("acme/1"), "team trimmed");
         assert_eq!(
             read_shared_task(&st.id).await.unwrap().title,
             "Release 0.3.1"
@@ -2070,21 +2064,21 @@ mod tests {
         assert!(read_shared_task("nope").await.is_none());
 
         // Linking is idempotent and pinned to {repo, number}.
-        link_shared_task(&st.id, RefKind::Issue, "dac2k9/lakitu-oss", 5)
+        link_shared_task(&st.id, RefKind::Issue, "acme/web", 5)
             .await
             .unwrap();
-        link_shared_task(&st.id, RefKind::Pr, "dac2k9/lakitu-oss", 9)
+        link_shared_task(&st.id, RefKind::Pr, "acme/web", 9)
             .await
             .unwrap();
-        let linked = link_shared_task(&st.id, RefKind::Pr, "dac2k9/lakitu-oss", 9)
+        let linked = link_shared_task(&st.id, RefKind::Pr, "acme/web", 9)
             .await
             .unwrap();
         assert_eq!(linked.issues.len(), 1);
         assert_eq!(linked.prs.len(), 1, "re-linking the same PR is idempotent");
 
         // Joining adds a participant; idempotent.
-        join_shared_task(&st.id, "protoman").await.unwrap();
-        let joined = join_shared_task(&st.id, "protoman").await.unwrap();
+        join_shared_task(&st.id, "carol").await.unwrap();
+        let joined = join_shared_task(&st.id, "carol").await.unwrap();
         assert_eq!(joined.participants.len(), 2, "re-join is idempotent");
 
         // Advancing appends a transition; same-state advance is a no-op.
@@ -2239,7 +2233,7 @@ mod tests {
         );
 
         // No-override: a human Done is never clobbered by a later reconcile.
-        advance_shared_task(&st.id, SharedTaskState::Done, "dac", None)
+        advance_shared_task(&st.id, SharedTaskState::Done, "dana", None)
             .await
             .unwrap();
         assert_eq!(

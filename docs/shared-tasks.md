@@ -1,6 +1,6 @@
 # Shared tasks + auto-sync — design
 
-Status: proposed (Dac-approved direction, 2026-06-22). Owner: lakitu (model/MCP/reconcile) + toad (web). Reviewer: protoman.
+Status: proposed (maintainer-approved direction, 2026-06-22). Owner: lakitu (model/MCP/reconcile) + toad (web). Reviewer: a designated review agent.
 
 ## The three asks
 1. Tasks shared across a **team** or the whole **fleet** (not just one agent).
@@ -10,7 +10,7 @@ Status: proposed (Dac-approved direction, 2026-06-22). Owner: lakitu (model/MCP/
 ## Keep the layers distinct
 - **Per-agent `Task`** (`tasks/<name>.json`) — a *private* scratchpad reminder. **Unchanged.** (Its doc comment is explicit: issues are the shared/reviewable unit; a task is the agent's own note.)
 - **GitHub issue** — the durable, shared, reviewable unit of work. **Unchanged.**
-- **NEW — `SharedTask`** — a team/fleet-scoped *goal* that **groups** issues + PRs across agents, with participants and a timeline. It *references* the units above; it does not duplicate them. (Example: "Release 0.3.1" was a fleet SharedTask spanning lakitu/toad/protoman/kirby + the keepalive PR.)
+- **NEW — `SharedTask`** — a team/fleet-scoped *goal* that **groups** issues + PRs across agents, with participants and a timeline. It *references* the units above; it does not duplicate them. (Example: "Release 0.3.1" was a fleet SharedTask spanning several agents (lakitu, toad, …) + the keepalive PR.)
 
 ## `SharedTask` schema  — `tasks/shared/<id>.json`
 ```
@@ -41,7 +41,7 @@ The robust fix is **not** forcing agents to update Lakitu; it's deriving state f
 3. Unlinked-PR flag in `sweep_agent_prs` — **lakitu** (chosen over a Stop-hook nudge; see #3)
 4. Web `/tasks` view — **toad** (+ lakitu on the snapshot DTO); coordinate once 1–3 land
 
-protoman reviews each PR.
+A designated agent reviews each PR.
 
 ## Open decisions (for review)
 - **Name + shape:** separate `SharedTask` entity (recommended — cleaner) vs. extending `Task` with scope/participants/timeline. Name: SharedTask / Initiative / Goal?

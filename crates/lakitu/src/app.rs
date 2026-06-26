@@ -1237,10 +1237,10 @@ impl App {
 }
 
 /// Resolve a repo string to a full `owner/name` slug. The agent log often records
-/// just the bare repo name (e.g. `fossid-vscode`); the registered agents carry
+/// just the bare repo name (e.g. `web`); the registered agents carry
 /// full slugs, so we infer the owner from them — matching the bare name to the
 /// agent that owns a repo with that basename (handles multi-org fleets, e.g.
-/// `local/codex` alongside `fossid-ab/*`). Falls back to the fleet's most common
+/// `local/helper` alongside `acme/*`). Falls back to the fleet's most common
 /// owner, then an optional `LAKITU_DEFAULT_OWNER`, then leaves it bare. Inferring
 /// from the roster means no per-machine env var is needed.
 pub(crate) fn resolve_repo(repo: &str, roster: &[Agent]) -> String {
@@ -2306,21 +2306,14 @@ mod tests {
                 context_pct: None,
             }
         }
-        let roster = vec![
-            ag("fossid-ab/fossid-vscode"),
-            ag("local/codex"),
-            ag("fossid-ab/fossid-mcp"),
-        ];
+        let roster = vec![ag("acme/web"), ag("local/helper"), ag("acme/api")];
         // A bare name matching an agent's repo basename → that agent's owner.
-        assert_eq!(
-            resolve_repo("fossid-vscode", &roster),
-            "fossid-ab/fossid-vscode"
-        );
-        assert_eq!(resolve_repo("codex", &roster), "local/codex");
+        assert_eq!(resolve_repo("web", &roster), "acme/web");
+        assert_eq!(resolve_repo("helper", &roster), "local/helper");
         // Already-qualified passes through untouched.
         assert_eq!(resolve_repo("acme/x", &roster), "acme/x");
-        // No name match → the fleet's most common owner (fossid-ab here).
-        assert_eq!(resolve_repo("mystery", &roster), "fossid-ab/mystery");
+        // No name match → the fleet's most common owner (acme here).
+        assert_eq!(resolve_repo("mystery", &roster), "acme/mystery");
     }
 
     #[test]

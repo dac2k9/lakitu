@@ -405,7 +405,7 @@ struct ClientGroup {
 /// registered client. Returns owned data (clones), so callers can mutate App.
 fn client_tree(app: &App) -> Vec<ClientGroup> {
     // Resolve each work-item's repo to a full owner/name slug from the roster,
-    // so bare log repos (e.g. `fossid-vscode`) match their owning agent — and
+    // so bare log repos (e.g. `web`) match their owning agent — and
     // produce correct GitHub links — instead of falling into "Unassigned".
     let items: Vec<WorkItem> = visible_work_items(app)
         .into_iter()
@@ -4522,7 +4522,7 @@ mod tests {
         let now = chrono::Local::now().fixed_offset();
         // A second agent that won't be in the project — it should float.
         app.roster.push(Agent {
-            name: "protoman".into(),
+            name: "carol".into(),
             kind: ClientKind::Agent,
             repo: "acme/review".into(),
             board: "acme/14".into(),
@@ -4550,10 +4550,10 @@ mod tests {
             text.contains("vscode-bot ★"),
             "coordinator marked with a trailing star on its row"
         );
-        assert!(text.contains("protoman"), "outside client still listed");
+        assert!(text.contains("carol"), "outside client still listed");
         assert!(text.contains("42%"), "per-agent context % rendered");
         // Outside / floating clients render on top, above the project sections.
-        let outside = text.find("protoman").unwrap();
+        let outside = text.find("carol").unwrap();
         let project = text.find("Auth Revamp").unwrap();
         assert!(outside < project, "outside client renders above projects");
     }

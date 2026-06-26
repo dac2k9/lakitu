@@ -298,13 +298,13 @@ mod tests {
         }
 
         // Full card, then a partial update that must preserve the bio.
-        set_identity("samus", Some("bounty hunter"), Some("methodical, terse"))
+        set_identity("alice", Some("bounty hunter"), Some("methodical, terse"))
             .await
             .unwrap();
-        set_identity("samus", Some("bounty hunter, refactor-first"), None)
+        set_identity("alice", Some("bounty hunter, refactor-first"), None)
             .await
             .unwrap();
-        let card = get_identity("samus").await.unwrap().unwrap();
+        let card = get_identity("alice").await.unwrap().unwrap();
         assert!(card.contains("refactor-first"), "tagline updated");
         assert!(
             card.contains("methodical, terse"),
@@ -312,36 +312,36 @@ mod tests {
         );
 
         // Peer notes accumulate (append-only) and round-trip via recall.
-        remember_peer("samus", "protoman", "great on CI", Some(3))
+        remember_peer("alice", "bob", "great on CI", Some(3))
             .await
             .unwrap();
-        remember_peer("samus", "protoman", "hates broad diffs", Some(2))
+        remember_peer("alice", "bob", "hates broad diffs", Some(2))
             .await
             .unwrap();
-        let peers = recall_peers("samus").await.unwrap();
+        let peers = recall_peers("alice").await.unwrap();
         assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].0, "protoman");
+        assert_eq!(peers[0].0, "bob");
         assert!(peers[0].1.contains("great on CI"));
         assert!(peers[0].1.contains("hates broad diffs"), "notes accumulate");
         assert!(peers[0].1.contains("affinity +3"));
 
         // Rename carries the persona and follows peers' notes about the agent.
-        remember_peer("nucleus", "samus", "solid pair", None)
+        remember_peer("nucleus", "alice", "solid pair", None)
             .await
             .unwrap();
-        rename_persona("samus", "aran").await;
+        rename_persona("alice", "alex").await;
         assert!(
-            get_identity("samus").await.unwrap().is_none(),
+            get_identity("alice").await.unwrap().is_none(),
             "old name gone"
         );
         assert!(
-            get_identity("aran").await.unwrap().is_some(),
+            get_identity("alex").await.unwrap().is_some(),
             "persona moved"
         );
         let nucleus_peers = recall_peers("nucleus").await.unwrap();
         assert_eq!(
-            nucleus_peers[0].0, "aran",
-            "peer note about samus follows the rename"
+            nucleus_peers[0].0, "alex",
+            "peer note about alice follows the rename"
         );
 
         let _ = std::fs::remove_dir_all(&home);
