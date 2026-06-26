@@ -297,6 +297,11 @@ pub struct SharedTask {
     /// Append-only state transitions, oldest first; the first entry is creation.
     #[serde(default)]
     pub timeline: Vec<TaskEvent>,
+    /// Archived = closed-and-put-away (the cockpit's ✕). Kept as history (not
+    /// deleted); excluded from the snapshot + default listings. Orthogonal to
+    /// `state`, which is left unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
     pub created: String,
     pub updated: String,
 }
@@ -1168,6 +1173,7 @@ pub async fn create_shared_task(
             by: owner,
             note: None,
         }],
+        archived: false,
         created: now.clone(),
         updated: now,
     };
@@ -1249,6 +1255,32 @@ pub async fn advance_shared_task(
     Ok(st)
 }
 
+/// Archive a shared task — set the `archived` flag (kept as history, NOT
+/// deleted; like a done task is retained) and append a timeline entry. The
+/// `state` is unchanged — archived is orthogonal. Idempotent (no-op if already
+/// archived). Archived tasks drop out of the snapshot + default listings but
+/// stay retrievable. Errors if no such task.
+pub async fn archive_shared_task(id: &str, by: &str) -> Result<SharedTask> {
+    let by = sanitize(by);
+    let mut st = match read_shared_task(id).await {
+        Some(s) => s,
+        None => bail!("no shared task '{}'", sanitize(id)),
+    };
+    if !st.archived {
+        let now = now_iso();
+        st.archived = true;
+        st.timeline.push(TaskEvent {
+            state: st.state,
+            ts: now.clone(),
+            by,
+            note: Some("archived".to_string()),
+        });
+        st.updated = now;
+        write_shared_task(&st).await?;
+    }
+    Ok(st)
+}
+
 /// Reconcile a shared task's state from PR signals — atomically. Reads the
 /// CURRENT state and applies [`SharedTaskState::reconciled_to`] to *that* state,
 /// then writes, so a manual `done`/`blocked` set after a sweep sampled its gh
@@ -1264,6 +1296,9 @@ pub async fn reconcile_advance(
         Some(s) => s,
         None => return Ok(None),
     };
+    if st.archived {
+        return Ok(None); // archived = put away; never reconcile
+    }
     let Some(next) = st.state.reconciled_to(has_open_pr, has_merged_pr) else {
         return Ok(None);
     };
@@ -1460,6 +1495,7 @@ pub async fn snapshot() -> crate::wire::SnapshotDto {
     let shared_tasks: Vec<crate::wire::SharedTaskDto> = list_shared_tasks()
         .await
         .into_iter()
+        .filter(|t| !t.archived) // archived drop out of the snapshot (kept as history; retrieve via list_shared_tasks include_archived)
         .map(shared_task_dto)
         .collect();
 
@@ -2111,6 +2147,57 @@ mod tests {
         assert_eq!(rel.prs.len(), 1);
         assert_eq!(rel.participants.len(), 2);
         assert_eq!(rel.timeline.last().unwrap().state, "done");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // _env guard intentionally held across .await
+    async fn archive_hides_from_snapshot_but_keeps_history() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("fleet-shared-archive-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: TEST_ENV_LOCK serializes the HOME-mutating tests.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("LAKITU_FLEET_ROOT");
+            std::env::remove_var("GENBOT_ROOT");
+        }
+
+        let st = create_shared_task("lakitu", "Archive me", None, TaskScope::Fleet, None)
+            .await
+            .unwrap();
+        assert!(!st.archived, "starts un-archived");
+
+        // Archive sets the flag + appends a timeline entry; state is untouched.
+        let a = archive_shared_task(&st.id, "dac").await.unwrap();
+        assert!(a.archived);
+        assert_eq!(a.state, st.state, "archive leaves state unchanged");
+        let tl = a.timeline.len();
+        assert_eq!(a.timeline.last().unwrap().note.as_deref(), Some("archived"));
+
+        // Idempotent: re-archiving is a no-op (no extra timeline entry).
+        let a2 = archive_shared_task(&st.id, "dac").await.unwrap();
+        assert!(a2.archived);
+        assert_eq!(a2.timeline.len(), tl, "re-archive adds no timeline entry");
+
+        // Kept as history (still on disk + readable)...
+        assert!(read_shared_task(&st.id).await.unwrap().archived);
+        // ...but excluded from the snapshot the web/cockpit render.
+        let snap = snapshot().await;
+        assert!(
+            snap.shared_tasks.iter().all(|t| t.id != st.id),
+            "archived task is dropped from the snapshot"
+        );
+
+        // Reconcile never touches an archived task.
+        assert_eq!(
+            reconcile_advance(&st.id, false, true, None).await.unwrap(),
+            None,
+            "archived tasks are not reconciled"
+        );
 
         let _ = std::fs::remove_dir_all(&home);
     }
