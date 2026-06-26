@@ -311,9 +311,6 @@ body::after {
 .composer-send { align-self: flex-end; cursor: pointer; font-family: var(--mono); font-size: 0.78rem; font-weight: 700; color: var(--void); background: var(--hud); border: 0; border-radius: 8px; padding: 6px 16px; }
 .composer-send:hover { filter: brightness(1.08); }
 .composer-send:disabled { opacity: 0.55; cursor: default; }
-.tbox { cursor: pointer; padding: 0; border: 0; background: none; font: inherit; color: var(--faint); }
-.tbox:hover { color: var(--live); }
-.tbox:disabled { color: var(--live); cursor: default; }
 
 /* ---- themed scrollbars (page + modal) ---- */
 html { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--haze) 38%, var(--edge)) transparent; }

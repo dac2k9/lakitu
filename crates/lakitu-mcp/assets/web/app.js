@@ -5,6 +5,10 @@
 //     element is replaced every 2s).
 //  2) A live local clock in the top bar (the #clock element is outside the
 //     swapped region, so it persists).
+//
+// Read-only: the cockpit mirrors the fleet but performs no writes — no bearer
+// token is placed in the page. Write-actions return in a later release behind a
+// same-origin CSRF token (kept out of the browser), per protoman's review.
 (function () {
   "use strict";
   var FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -31,7 +35,7 @@
   setInterval(tick, 1000);
   tick();
 
-  // 3) Close the inbox drawer via its close button, the backdrop, or Escape.
+  // Close the inbox drawer via its close button, the backdrop, or Escape.
   function closeDrawer() {
     var d = document.getElementById("drawer");
     if (d) d.innerHTML = "";
@@ -43,112 +47,12 @@
     if (e.key === "Escape") closeDrawer();
   });
 
-  // 4) Write-actions, taken AS the supervisor — the browser calls /v1 with the
-  //    bearer from the (loopback-only) page. The JSON content-type forces a CORS
-  //    preflight, so cross-origin can't forge these even setting the token aside.
-  function meta(n) {
-    var m = document.querySelector('meta[name="' + n + '"]');
-    return m ? m.content : "";
-  }
-  function api(method, path, body) {
-    return fetch(path, {
-      method: method,
-      headers: { Authorization: "Bearer " + meta("lakitu-token"), "Content-Type": "application/json" },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-  }
-  function reloadInbox(to) {
-    if (window.htmx)
-      window.htmx.ajax("GET", "/partial/inbox/" + encodeURIComponent(to), { target: "#drawer", swap: "innerHTML" });
-  }
-  function reloadBoard() {
-    if (window.htmx) window.htmx.ajax("GET", "/partial/view/fleet", { target: "#view", swap: "outerHTML" });
-  }
-  // Reload the tasks view (show-done kept — the ✕ only appears in that mode).
-  function reloadTasks() {
-    if (window.htmx) window.htmx.ajax("GET", "/partial/view/tasks?show_done=1", { target: "#view", swap: "outerHTML" });
-  }
-
-  // Send a message (drawer composer): recipient from the <select> or
-  // data-send-to, from = you (the supervisor); then reload the open inbox.
-  document.addEventListener("submit", function (e) {
-    var form = e.target.closest("[data-msg-form]");
-    if (!form) return;
-    e.preventDefault();
-    var sel = form.querySelector('[name="to"]');
-    var to = sel ? sel.value : form.getAttribute("data-send-to");
-    var title = form.querySelector('[name="title"]').value.trim();
-    var body = form.querySelector('[name="body"]').value.trim();
-    if (!to || !title || !body) return;
-    var owner = form.getAttribute("data-inbox");
-    var btn = form.querySelector('button[type="submit"]');
-    if (btn) {
-      btn.disabled = true;
-      btn.textContent = "sending…";
-    }
-    api("POST", "/v1/messages", { from: meta("lakitu-me"), to: to, title: title, body: body })
-      .then(function (r) {
-        if (r.ok) {
-          reloadInbox(owner);
-        } else if (btn) {
-          btn.disabled = false;
-          btn.textContent = "send";
-          alert("send failed (" + r.status + ")");
-        }
-      })
-      .catch(function () {
-        if (btn) {
-          btn.disabled = false;
-          btn.textContent = "send";
-        }
-      });
-  });
-
-  // Check off a task on a card.
-  document.addEventListener("click", function (e) {
-    var b = e.target.closest("[data-task-done]");
-    if (!b) return;
-    var owner = b.getAttribute("data-owner");
-    var id = b.getAttribute("data-id");
-    b.disabled = true;
-    b.textContent = "▣";
-    api("PATCH", "/v1/agents/" + encodeURIComponent(owner) + "/tasks/" + encodeURIComponent(id), { done: true })
-      .then(function (r) {
-        if (r.ok) reloadBoard();
-        else {
-          b.disabled = false;
-          b.textContent = "▢";
-        }
-      })
-      .catch(function () {
-        b.disabled = false;
-        b.textContent = "▢";
-      });
-  });
-
-  // Archive a done shared task (the ✕) — removes it from the board (kept as
-  // history server-side); same write-then-reload pattern as the task-done ✓.
-  document.addEventListener("click", function (e) {
-    var b = e.target.closest("[data-archive-task]");
-    if (!b) return;
-    var id = b.getAttribute("data-id");
-    b.disabled = true;
-    api("POST", "/v1/shared-tasks/" + encodeURIComponent(id) + "/archive", { by: meta("lakitu-me") })
-      .then(function (r) {
-        if (r.ok) reloadTasks();
-        else b.disabled = false;
-      })
-      .catch(function () {
-        b.disabled = false;
-      });
-  });
-
-  // 5) Tabs — toggle the active class (htmx swaps #view via the button's hx-get).
+  // Tabs — toggle the active class (htmx swaps #view via the button's hx-get).
   document.addEventListener("click", function (e) {
     var tab = e.target.closest(".tab");
     if (!tab) return;
     var tabs = tab.parentNode.querySelectorAll(".tab");
-    for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove("active");
+    for (var k = 0; k < tabs.length; k++) tabs[k].classList.remove("active");
     tab.classList.add("active");
   });
 })();

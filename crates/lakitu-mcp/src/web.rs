@@ -102,17 +102,6 @@ fn inbox_drawer(name: &str, snap: &SnapshotDto) -> Markup {
     let msgs = snap.inboxes.get(name);
     let total = msgs.map_or(0, Vec::len);
     let unread = msgs.map_or(0, |m| m.iter().filter(|x| !x.read).count());
-    let is_supervisor = snap
-        .agents
-        .iter()
-        .any(|a| a.kind == "human" && a.name == name);
-    let mut recipients: Vec<&str> = snap
-        .agents
-        .iter()
-        .filter(|a| a.kind != "human")
-        .map(|a| a.name.as_str())
-        .collect();
-    recipients.sort_unstable();
     html! {
         div class="drawer-backdrop" data-close-drawer="1" {}
         aside class="drawer-panel" {
@@ -122,25 +111,6 @@ fn inbox_drawer(name: &str, snap: &SnapshotDto) -> Markup {
                     span class="drawer-sub" { (unread) " unread · " (total) " total" }
                 }
                 button class="drawer-close" data-close-drawer="1" aria-label="close inbox" { "✕" }
-            }
-            div class="composer" {
-                @if is_supervisor {
-                    form data-msg-form data-inbox=(name) {
-                        select class="composer-to" name="to" required {
-                            option value="" disabled selected { "to…" }
-                            @for r in &recipients { option value=(r) { (r) } }
-                        }
-                        input class="composer-title" name="title" placeholder="subject" required;
-                        textarea class="composer-body" name="body" placeholder="message…" required {}
-                        button type="submit" class="composer-send" { "send" }
-                    }
-                } @else {
-                    form data-msg-form data-inbox=(name) data-send-to=(name) {
-                        input class="composer-title" name="title" placeholder="subject" required;
-                        textarea class="composer-body" name="body" placeholder=(format!("message {name}…")) required {}
-                        button type="submit" class="composer-send" { "send" }
-                    }
-                }
             }
             @if let Some(list) = msgs {
                 @if list.is_empty() {
@@ -310,9 +280,6 @@ fn shared_task_card(t: &SharedTaskDto, snap: &SnapshotDto) -> Markup {
                     span class="role" { (scope_label(t)) }
                 }
                 span class=(format!("state-label {cls}")) { (t.state) }
-                @if t.state == "done" {
-                    button class="tcard-x" data-archive-task data-id=(t.id) title="archive — remove from the board" { "✕" }
-                }
             }
 
             @if let Some(goal) = &t.goal {
@@ -474,23 +441,14 @@ fn scope_label(t: &SharedTaskDto) -> String {
 }
 
 fn page(snap: &SnapshotDto) -> Markup {
-    // The web cockpit acts AS the supervisor. The bearer token is injected into
-    // the (loopback-only, host-guarded) page so the browser can call /v1 for
-    // writes — which keeps the web routes themselves GET-only (see daemon.rs).
-    let token = std::env::var("LAKITU_FLEET_TOKEN").unwrap_or_default();
-    let me = snap
-        .agents
-        .iter()
-        .find(|a| a.kind == "human")
-        .map_or("", |a| a.name.as_str());
+    // Read-only mirror: no bearer token in the page (the web performs no writes).
+    // Write-actions return in a later release behind a same-origin CSRF token.
     html! {
         (DOCTYPE)
         html lang="en" {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
-                meta name="lakitu-token" content=(token);
-                meta name="lakitu-me" content=(me);
                 title { "Lakitu · fleet lens" }
                 link rel="stylesheet" href="/assets/app.css";
                 script src="/assets/htmx.min.js" defer {}
@@ -739,7 +697,7 @@ fn agent_card(a: &AgentDto, snap: &SnapshotDto) -> Markup {
                 ul class="tasklist" {
                     @for t in open.iter().take(3) {
                         li {
-                            button class="tbox" data-task-done data-owner=(a.name) data-id=(t.id) title="mark done" { "▢" }
+                            span class="tbox" { "▢" }
                             span class="ttext" { (t.text) }
                         }
                     }
