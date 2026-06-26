@@ -43,7 +43,7 @@ We can't *hard-block* `gh` — agents have Bash and can shell out; truly prevent
 - **Backstop:** `sweep_agent_prs` already flags open PRs not linked to a shared task (#9); extend it to flag *any* PR not opened via the wrapper, surfaced in the cockpit as "untracked" — so a raw-gh PR that slips through is still caught.
 
 ## Bonus: single control point
-The wrapper centralizes things agents shouldn't each reinvent: repo normalization, PR-body templates, and notably **gh account selection** — the `dac2k9` vs `johan-larsson-fossid` switching done by hand today could move into the wrapper, keyed by the target repo.
+The wrapper centralizes things agents shouldn't each reinvent: repo normalization, PR-body templates, and notably **gh account selection** — the per-repo account switching done by hand today (a project account vs a personal one) could move into the wrapper, keyed by the target repo.
 
 ## Phasing & owners
 1. `open_pr` + `file_issue` + record-on-create + the snapshot open-PRs surface — **lakitu** (MCP + store/snapshot).
