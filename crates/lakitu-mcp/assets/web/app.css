@@ -356,6 +356,10 @@ html { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--haze) 38
 .tcard-head { display: flex; align-items: center; gap: 0.6rem; }
 .tcard-head .id { flex: 1; min-width: 0; }
 .tcard-head .name { white-space: normal; }  /* task titles wrap, unlike agent names */
+/* ✕ archive — only on done cards; removes the task from the board (kept server-side) */
+.tcard-x { flex: none; cursor: pointer; font-family: var(--mono); font-size: 0.78rem; line-height: 1; color: var(--faint); background: none; border: 0; padding: 2px 5px; border-radius: 6px; }
+.tcard-x:hover { color: var(--focus); background: color-mix(in srgb, var(--focus) 14%, transparent); }
+.tcard-x:disabled { color: var(--faint); cursor: default; }
 
 /* task-state colours — the ts-* set, distinct from the agent st-* set */
 .ts-open    { color: var(--idle); }

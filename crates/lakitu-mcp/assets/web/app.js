@@ -62,7 +62,11 @@
       window.htmx.ajax("GET", "/partial/inbox/" + encodeURIComponent(to), { target: "#drawer", swap: "innerHTML" });
   }
   function reloadBoard() {
-    if (window.htmx) window.htmx.ajax("GET", "/partial/board", { target: "#live", swap: "outerHTML" });
+    if (window.htmx) window.htmx.ajax("GET", "/partial/view/fleet", { target: "#view", swap: "outerHTML" });
+  }
+  // Reload the tasks view (show-done kept — the ✕ only appears in that mode).
+  function reloadTasks() {
+    if (window.htmx) window.htmx.ajax("GET", "/partial/view/tasks?show_done=1", { target: "#view", swap: "outerHTML" });
   }
 
   // Send a message (drawer composer): recipient from the <select> or
@@ -119,6 +123,23 @@
       .catch(function () {
         b.disabled = false;
         b.textContent = "▢";
+      });
+  });
+
+  // Archive a done shared task (the ✕) — removes it from the board (kept as
+  // history server-side); same write-then-reload pattern as the task-done ✓.
+  document.addEventListener("click", function (e) {
+    var b = e.target.closest("[data-archive-task]");
+    if (!b) return;
+    var id = b.getAttribute("data-id");
+    b.disabled = true;
+    api("POST", "/v1/shared-tasks/" + encodeURIComponent(id) + "/archive", { by: meta("lakitu-me") })
+      .then(function (r) {
+        if (r.ok) reloadTasks();
+        else b.disabled = false;
+      })
+      .catch(function () {
+        b.disabled = false;
       });
   });
 

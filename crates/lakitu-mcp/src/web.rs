@@ -310,6 +310,9 @@ fn shared_task_card(t: &SharedTaskDto, snap: &SnapshotDto) -> Markup {
                     span class="role" { (scope_label(t)) }
                 }
                 span class=(format!("state-label {cls}")) { (t.state) }
+                @if t.state == "done" {
+                    button class="tcard-x" data-archive-task data-id=(t.id) title="archive — remove from the board" { "✕" }
+                }
             }
 
             @if let Some(goal) = &t.goal {
