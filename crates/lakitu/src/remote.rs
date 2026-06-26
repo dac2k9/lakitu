@@ -1,4 +1,4 @@
-//! HTTP client for the lakitu daemon (`lakitu-mcp serve`), used when the
+//! HTTP client for the lakitu daemon (`lakitu serve`), used when the
 //! cockpit runs in `--server` mode against a remote fleet. It mirrors the local
 //! `client.rs` writes and the `store.rs` snapshot read, but over the wire — the
 //! daemon owns the store. The wire DTOs here are the deserializing counterparts

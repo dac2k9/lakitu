@@ -1,37 +1,39 @@
-//! lakitu — live TUI for the Claude Code agent activity log.
+//! lakitu — one binary, several subcommands.
+//!
+//! Default (no subcommand) is the live TUI cockpit for the Claude Code agent
+//! activity log. The fleet's MCP server + coordination daemon live under verbs:
+//!   * `lakitu mcp` — **stdio** MCP, Claude Code's local per-agent transport;
+//!   * `lakitu serve` — the **HTTP daemon** (MCP-over-HTTP + a `/v1` REST API);
+//!   * `lakitu install-hooks` — materialize the lifecycle hooks + coordination
+//!     skill into `~/.claude`.
+//!
+//! Each subcommand owns its own error type (the TUI uses `color-eyre`, the
+//! server/daemon/installer use `anyhow`); the dispatcher converts at the
+//! boundary, mapping any error to a stderr print + non-zero exit. tracing is
+//! initialized once, per arm — never twice — and the stdio `mcp` arm keeps
+//! stdout clean for the JSON-RPC wire by logging to a side-channel file.
 
-// Nested `if`s and the markdown-list doc comments are deliberate for
-// readability; we keep them rather than collapse/reflow on clippy's say-so.
-#![allow(
-    clippy::collapsible_if,
-    clippy::collapsible_match,
-    clippy::doc_lazy_continuation
-)]
-
-mod app;
-mod client;
-mod event;
-mod gh;
-mod log;
-mod remote;
-mod store;
-mod ui;
-mod work;
-
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use color_eyre::Result;
 use tracing_subscriber::EnvFilter;
+
+use lakitu::{app, client, remote, store};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "lakitu",
     version,
-    about = "Live TUI for the Claude Code agent activity log",
+    about = "Live TUI cockpit for a fleet of coordinating Claude Code agents",
     long_about = None
 )]
 struct Cli {
+    /// Subcommand. With none, lakitu runs the TUI cockpit (the flags below).
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Path to the agent activity log. Defaults to
     /// `$HOME/.claude/logs/agent-actions.log`.
     #[arg(long, short = 'l', env = "AGENT_LOG")]
@@ -54,7 +56,7 @@ struct Cli {
     #[arg(long, env = "LAKITU_FLEET_ME")]
     me: Option<String>,
 
-    /// Watch a remote lakitu daemon (`lakitu-mcp serve`) at this URL instead of
+    /// Watch a remote lakitu daemon (`lakitu serve`) at this URL instead of
     /// the local store — e.g. `http://host:8787`. Also `$LAKITU_FLEET_SERVER`.
     #[arg(long, env = "LAKITU_FLEET_SERVER")]
     server: Option<String>,
@@ -72,8 +74,105 @@ struct Cli {
     image_test: Option<PathBuf>,
 }
 
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Run the stdio MCP server (Claude Code's local per-agent transport).
+    Mcp,
+    /// Run the HTTP daemon: MCP-over-HTTP plus a `/v1` REST API.
+    Serve,
+    /// Materialize the fleet lifecycle hooks + coordination skill into `~/.claude`.
+    InstallHooks,
+}
+
 #[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
+    use std::process::ExitCode;
+
+    let cli = Cli::parse();
+
+    match cli.command {
+        // The stdio MCP path (formerly the `lakitu-mcp` default mode). tracing
+        // goes to a side-channel file because stdout is reserved for the
+        // JSON-RPC wire.
+        Some(Command::Mcp) => match run_mcp_stdio().await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{e:#}");
+                ExitCode::FAILURE
+            }
+        },
+        // The HTTP daemon (formerly `lakitu-mcp serve`).
+        Some(Command::Serve) => match lakitu::daemon::serve().await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{e:#}");
+                ExitCode::FAILURE
+            }
+        },
+        // The installer (formerly `lakitu-mcp install-hooks`).
+        Some(Command::InstallHooks) => match lakitu::install::run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{e:#}");
+                ExitCode::FAILURE
+            }
+        },
+        // No subcommand: the TUI cockpit.
+        None => {
+            // No-tty guard: if no TUI-action flag was passed and stdout isn't a
+            // terminal, the user almost certainly meant `lakitu mcp` (e.g. an
+            // MCP config still pointing the command at bare `lakitu`). Bail with
+            // a hint rather than tearing down a non-existent terminal.
+            if cli.image_test.is_none() && !cli.dump_store && !std::io::stdout().is_terminal() {
+                eprintln!(
+                    "lakitu: no TTY detected — did you mean `lakitu mcp` (run the MCP server)? See `lakitu --help`."
+                );
+                return ExitCode::FAILURE;
+            }
+            match run_tui(cli).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("{e:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+    }
+}
+
+/// stdio MCP server (the old `lakitu-mcp` default mode), moved verbatim:
+/// tracing → side-channel temp file (stdout stays clean for JSON-RPC), then
+/// serve `AgentBoardService` over stdio until the client disconnects.
+async fn run_mcp_stdio() -> anyhow::Result<()> {
+    use rmcp::{ServiceExt, transport::stdio};
+
+    use lakitu::server::AgentBoardService;
+
+    // tracing goes to a side-channel file because in stdio mode stdout is
+    // reserved for the JSON-RPC wire. macOS' temp_dir lands in /var/folders/...;
+    // fine for dev. If we ever want persistent logs, switch to ~/.claude/logs.
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::env::temp_dir().join("lakitu-mcp.log"))?;
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .with_writer(log_file)
+        .with_ansi(false)
+        .init();
+
+    tracing::info!("lakitu mcp starting (stdio)");
+    let service = AgentBoardService::new();
+    service.serve(stdio()).await?.waiting().await?;
+    Ok(())
+}
+
+/// The TUI cockpit (the old `lakitu` default), moved verbatim apart from
+/// reading the parsed `Cli` through and reaching modules via the `lakitu::`
+/// crate path.
+async fn run_tui(cli: Cli) -> Result<()> {
     color_eyre::install()?;
 
     // Dev logging goes to a file so it doesn't fight the TUI.
@@ -88,8 +187,6 @@ async fn main() -> Result<()> {
         .with_writer(log_file)
         .with_ansi(false)
         .init();
-
-    let cli = Cli::parse();
 
     // Probe: render an image inline via the kitty graphics protocol, then exit.
     if let Some(p) = cli.image_test {

@@ -1400,6 +1400,8 @@ dependencies = [
 name = "lakitu"
 version = "0.4.0"
 dependencies = [
+ "anyhow",
+ "axum",
  "base64",
  "chrono",
  "clap",
@@ -1407,25 +1409,10 @@ dependencies = [
  "crossterm",
  "futures",
  "image",
+ "maud",
  "ratatui",
  "ratatui-image",
  "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "webbrowser",
-]
-
-[[package]]
-name = "lakitu-mcp"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "maud",
  "rmcp",
  "schemars",
  "serde",
@@ -1434,6 +1421,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "webbrowser",
 ]
 
 [[package]]
