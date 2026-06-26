@@ -2166,7 +2166,7 @@ pub struct AddTaskRequest {
     #[schemars(description = "Your own agent name — the task is added to your list.")]
     pub name: String,
     #[schemars(
-        description = "The reminder title — short and actionable (e.g. 'reply to samus about the schema', 'update the changelog before merging')."
+        description = "The reminder title — short and actionable (e.g. 'reply to a teammate about the schema', 'update the changelog before merging')."
     )]
     pub text: String,
     #[schemars(
@@ -2224,7 +2224,7 @@ pub struct CreateSharedTaskRequest {
     #[schemars(description = "Who shares it: 'team' (one board) or 'fleet' (everyone).")]
     pub scope: fleet::TaskScope,
     #[schemars(
-        description = "For scope=team: the board it belongs to, 'owner/projectNumber' (e.g. 'fossid-ab/14'). Required for team scope; ignored for fleet."
+        description = "For scope=team: the board it belongs to, 'owner/projectNumber' (e.g. 'acme/14'). Required for team scope; ignored for fleet."
     )]
     #[serde(default)]
     pub team: Option<String>,
@@ -2236,7 +2236,7 @@ pub struct LinkSharedTaskRequest {
     pub id: String,
     #[schemars(description = "What you're linking: 'issue' or 'pr'.")]
     pub kind: fleet::RefKind,
-    #[schemars(description = "The repo of the issue/PR, 'owner/name' (e.g. 'dac2k9/lakitu-oss').")]
+    #[schemars(description = "The repo of the issue/PR, 'owner/name' (e.g. 'acme/web').")]
     pub repo: String,
     #[schemars(description = "The issue or PR number.")]
     pub number: u64,
@@ -2978,20 +2978,16 @@ mod tests {
     #[test]
     fn parse_referencing_prs_keeps_open_merged_cross_repo() {
         let json = r#"{"data":{"repository":{"issue":{"timelineItems":{"nodes":[
-            {"source":{"number":349,"state":"OPEN","repository":{"nameWithOwner":"fossid-ab/fossid-toolbox"},"author":{"login":"rush"}}},
-            {"source":{"number":76,"state":"MERGED","repository":{"nameWithOwner":"fossid-ab/fossid-mcp"},"author":{"login":"link"}}},
-            {"source":{"number":12,"state":"CLOSED","repository":{"nameWithOwner":"fossid-ab/x"},"author":{"login":"abandoned"}}},
+            {"source":{"number":349,"state":"OPEN","repository":{"nameWithOwner":"acme/cli"},"author":{"login":"carol"}}},
+            {"source":{"number":76,"state":"MERGED","repository":{"nameWithOwner":"acme/api"},"author":{"login":"alice"}}},
+            {"source":{"number":12,"state":"CLOSED","repository":{"nameWithOwner":"acme/x"},"author":{"login":"abandoned"}}},
             {"source":{}}
         ]}}}}}"#;
         assert_eq!(
             parse_referencing_prs(json),
             vec![
-                (
-                    "fossid-ab/fossid-toolbox".to_string(),
-                    349,
-                    "rush".to_string()
-                ),
-                ("fossid-ab/fossid-mcp".to_string(), 76, "link".to_string()),
+                ("acme/cli".to_string(), 349, "carol".to_string()),
+                ("acme/api".to_string(), 76, "alice".to_string()),
             ],
             "open + merged cross-repo PR refs kept; closed-unmerged + non-PR source dropped"
         );
@@ -3003,10 +2999,10 @@ mod tests {
     #[test]
     fn format_agent_row_omits_blurb_unless_verbose() {
         let a = fleet::AgentSummary {
-            name: "link".into(),
+            name: "alice".into(),
             kind: "agent".into(),
-            repo: "fossid-ab/fossid-mcp".into(),
-            board: "fossid-ab/14".into(),
+            repo: "acme/api".into(),
+            board: "acme/14".into(),
             role: Some("scan backend".into()),
             description: Some("a long capability blurb that costs tokens".into()),
             state: "idle".into(),

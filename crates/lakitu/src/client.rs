@@ -546,7 +546,7 @@ mod tests {
         let root = scratch("tasks");
 
         // add_task trims, defaults done=false, and stores body / pr / from_msg.
-        let id1 = add_task(&root, "aria", "  reply to samus  ", None, None, None).unwrap();
+        let id1 = add_task(&root, "aria", "  reply to bob  ", None, None, None).unwrap();
         assert_eq!(id1.len(), 6);
         let id2 = add_task(
             &root,
@@ -564,7 +564,7 @@ mod tests {
         };
         let v = read(&root);
         assert_eq!(v.len(), 2);
-        assert_eq!(v[0]["text"], "reply to samus", "text trimmed");
+        assert_eq!(v[0]["text"], "reply to bob", "text trimmed");
         assert_eq!(v[0]["done"], false, "new tasks start open");
         assert!(v[0].get("body").is_none(), "no body when none given");
         assert_eq!(v[1]["body"], "cover the dedup fix and the new flag");
@@ -657,27 +657,27 @@ mod tests {
         let billing = ps.iter().find(|p| p.name == "Billing").unwrap().id.clone();
 
         // Move a client in, then make it coordinator.
-        let ps = set_membership(&root, "samus", Some(&auth)).unwrap();
+        let ps = set_membership(&root, "alice", Some(&auth)).unwrap();
         assert!(
             ps.iter()
                 .find(|p| p.id == auth)
                 .unwrap()
                 .members
-                .contains(&"samus".into())
+                .contains(&"alice".into())
         );
-        let ps = toggle_coordinator(&root, &auth, "samus").unwrap();
+        let ps = toggle_coordinator(&root, &auth, "alice").unwrap();
         assert_eq!(
             ps.iter()
                 .find(|p| p.id == auth)
                 .unwrap()
                 .coordinator
                 .as_deref(),
-            Some("samus")
+            Some("alice")
         );
 
         // Moving it to another project drops membership AND coordinator on the
         // one it left.
-        let ps = set_membership(&root, "samus", Some(&billing)).unwrap();
+        let ps = set_membership(&root, "alice", Some(&billing)).unwrap();
         let left = ps.iter().find(|p| p.id == auth).unwrap();
         assert!(left.members.is_empty(), "left the old project");
         assert!(left.coordinator.is_none(), "coordinator cleared on leave");
@@ -686,15 +686,15 @@ mod tests {
                 .find(|p| p.id == billing)
                 .unwrap()
                 .members
-                .contains(&"samus".into())
+                .contains(&"alice".into())
         );
 
         // Removing a project just drops it — members float (no longer listed).
         let ps = remove_project(&root, &billing).unwrap();
         assert!(!ps.iter().any(|p| p.id == billing));
         assert!(
-            !ps.iter().any(|p| p.members.contains(&"samus".into())),
-            "samus floats"
+            !ps.iter().any(|p| p.members.contains(&"alice".into())),
+            "alice floats"
         );
 
         // Persisted to disk.

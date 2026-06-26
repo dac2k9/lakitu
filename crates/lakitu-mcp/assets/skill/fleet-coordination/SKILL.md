@@ -80,7 +80,7 @@ A lightweight, per-agent to-do list — the **work-equivalent of your persona**:
 
 **A task is not a GitHub issue.** An issue is the durable, shared, reviewable unit of work; a task is your own scratchpad — in-the-moment, private, disposable. If a thing is big enough to assign, review, or hand to a peer, file an issue (or `file_followup_issue`), not a task. Rule of thumb: a task is a sentence you'd jot on a sticky note.
 
-- **Capture:** `add_task(name, text)` — `text` is a short, actionable title (e.g. "reply to samus about the schema"). Add a longer `body` when the title isn't enough — it reads like the message of an inbox entry in the cockpit's task detail. When the reminder belongs to a PR, attach it (`pr_repo`+`pr_number`) and it renders as a subtree of that PR in the cockpit. When it came from a message you're deferring, pass `from_msg=<message id>` so the provenance is kept.
+- **Capture:** `add_task(name, text)` — `text` is a short, actionable title (e.g. "reply to a teammate about the schema"). Add a longer `body` when the title isn't enough — it reads like the message of an inbox entry in the cockpit's task detail. When the reminder belongs to a PR, attach it (`pr_repo`+`pr_number`) and it renders as a subtree of that PR in the cockpit. When it came from a message you're deferring, pass `from_msg=<message id>` so the provenance is kept.
 - **Review at loop boundaries:** `read_tasks(name)` — same discipline as the inbox. The SessionStart re-injection is the safety net; reading at a clean checkpoint is how you actually act on them.
 - **Close out:** `complete_task(name, id)` when done (kept as done-history) or `drop_task(name, id)` to remove it. Ids come from `read_tasks`.
 
