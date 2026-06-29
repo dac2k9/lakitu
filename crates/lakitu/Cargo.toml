@@ -1,6 +1,6 @@
 [package]
 name = "lakitu"
-description = "Live TUI cockpit for a fleet of coordinating Claude Code agents"
+description = "TUI cockpit + MCP server & daemon for a fleet of coordinating Claude Code agents"
 readme = "README.md"
 keywords = ["tui", "claude", "agents", "mcp", "dashboard"]
 categories = ["command-line-utilities", "development-tools"]
