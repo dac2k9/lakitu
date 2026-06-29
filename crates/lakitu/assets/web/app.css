@@ -364,6 +364,7 @@ html { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--haze) 38
 .ts-blocked { color: var(--focus); }
 .ts-review  { color: var(--hold); }
 .ts-done    { color: var(--faint); }
+.glyph.ts-done { color: var(--live); }  /* green ✓ for done; the rest of a done card stays muted */
 .ts-unknown { color: var(--haze); }
 .now.ts-open { color: var(--idle); }
 .now.ts-active { color: var(--live); }
@@ -392,7 +393,10 @@ html { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--haze) 38
 }
 
 /* linked issues + PRs — pills that open the item on GitHub */
-.refs { display: flex; flex-wrap: wrap; gap: 6px; }
+.refs { display: flex; flex-direction: column; gap: 5px; }
+.refs-head { font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
+.refgroup { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.refgroup-label { flex: none; min-width: 3.4em; font-family: var(--mono); font-size: 0.66rem; color: var(--haze); }
 .pill {
   display: inline-flex; align-items: center; gap: 0.3rem;
   font-family: var(--mono); font-size: 0.74rem; text-decoration: none;

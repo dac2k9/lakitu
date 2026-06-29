@@ -294,8 +294,19 @@ fn shared_task_card(t: &SharedTaskDto, snap: &SnapshotDto) -> Markup {
 
             @if linked > 0 {
                 div class="refs" {
-                    @for i in &t.issues { (ref_pill(i, "issue")) }
-                    @for p in &t.prs { (ref_pill(p, "pr")) }
+                    span class="refs-head" { "Linked" }
+                    @if !t.issues.is_empty() {
+                        div class="refgroup" {
+                            span class="refgroup-label" { "issues" }
+                            @for i in &t.issues { (ref_pill(i, "issue")) }
+                        }
+                    }
+                    @if !t.prs.is_empty() {
+                        div class="refgroup" {
+                            span class="refgroup-label" { "prs" }
+                            @for p in &t.prs { (ref_pill(p, "pr")) }
+                        }
+                    }
                 }
             }
 
