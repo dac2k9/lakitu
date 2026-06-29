@@ -1,4 +1,4 @@
-//! Read-only web cockpit (`GET /`) served by `lakitu-mcp serve` on loopback —
+//! Read-only web cockpit (`GET /`) served by `lakitu serve` on loopback —
 //! "Lakitu's lens".
 //!
 //! A browser-facing mirror of the TUI: it renders the same `fleet::snapshot()`

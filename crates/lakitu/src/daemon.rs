@@ -1,4 +1,4 @@
-//! HTTP daemon mode (`lakitu-mcp serve`).
+//! HTTP daemon mode (`lakitu serve`).
 //!
 //! Serves the same `AgentBoardService` tools as the stdio binary, but over
 //! MCP-over-HTTP (rmcp's streamable-HTTP transport) so agents on other machines

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/lakitu", "crates/lakitu-mcp"]
+members = ["crates/lakitu"]
 
 # Shared package metadata — inherited by each crate via `*.workspace = true`.
 [workspace.package]

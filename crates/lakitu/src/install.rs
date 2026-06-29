@@ -1,8 +1,8 @@
-//! `lakitu-mcp install-hooks` — materialize the fleet lifecycle hooks and the
+//! `lakitu install-hooks` — materialize the fleet lifecycle hooks and the
 //! coordination skill into `~/.claude`, and wire the hooks into `settings.json`.
 //!
 //! The hook scripts + skill are embedded in the binary (see `assets/`), so a
-//! `cargo install lakitu-mcp` user gets a working fleet without cloning the
+//! `cargo install lakitu` user gets a working fleet without cloning the
 //! repo. Idempotent: re-running only adds what's missing, and `settings.json`
 //! is backed up before it's touched.
 
@@ -202,8 +202,8 @@ fn wire_settings(path: &Path, fleet: &Path) -> Result<()> {
 fn print_next_steps(fleet: &Path) {
     println!(
         "\nFleet hooks installed (store: {}). Two steps to bring an agent online:\n\
-         \n  1. Point the agent's MCP at lakitu-mcp — in its .mcp.json (or ~/.claude.json):\n\
-         \n       {{ \"mcpServers\": {{ \"lakitu-mcp\": {{ \"command\": \"lakitu-mcp\" }} }} }}\n\
+         \n  1. Point the agent's MCP at `lakitu mcp` — in its .mcp.json (or ~/.claude.json):\n\
+         \n       {{ \"mcpServers\": {{ \"lakitu-mcp\": {{ \"command\": \"lakitu\", \"args\": [\"mcp\"] }} }} }}\n\
          \n  2. Export a stable name so the hooks find its inbox/presence:\n\
          \n       export LAKITU_FLEET_NAME=<name>\n\
          \nThen watch the fleet from the cockpit:  lakitu",

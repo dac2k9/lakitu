@@ -11,20 +11,43 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[lib]
+name = "lakitu"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lakitu"
+path = "src/main.rs"
+
+[[bin]]
+name = "lakitu-mcp"
+path = "src/bin/lakitu-mcp.rs"
+
 [dependencies]
-ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time", "process"] }
-clap = { version = "4", features = ["derive", "env"] }
-color-eyre = "0.6"
+# Shared by both the TUI and the MCP server/daemon.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "sync", "time", "net", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-webbrowser = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# TUI cockpit.
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+clap = { version = "4", features = ["derive", "env"] }
+color-eyre = "0.6"
+webbrowser = "1"
+futures = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "webp"] }
 base64 = "0.22"
 ratatui-image = "8"
+
+# MCP server + coordination daemon.
+rmcp = { version = "0.16", features = ["server", "transport-io", "transport-streamable-http-server"] }
+tokio-util = "0.7"
+axum = "0.8"
+schemars = "1.0"
+anyhow = "1"
+maud = "0.27.0"
