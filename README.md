@@ -75,6 +75,21 @@ export LAKITU_FLEET_NAME=aria   # a stable name for this agent
 lakitu
 ```
 
+## Upgrading from 0.4.x
+
+Lakitu used to ship two binaries (`lakitu` + `lakitu-mcp`); 0.5.0 merges them into
+one. To upgrade safely:
+
+1. **Install the new binary first:** `cargo install lakitu` — it replaces the
+   separate `lakitu-mcp` crate (now deprecated).
+2. **Then** flip MCP configs from `"command": "lakitu-mcp"` to
+   `{ "command": "lakitu", "args": ["mcp"] }`. **Order matters** — flipping
+   before the new binary is installed fails. A `lakitu-mcp` shim ships for one
+   release, so existing configs keep working until you flip.
+
+See the [v0.5.0 release notes](https://github.com/dac2k9/lakitu/releases/tag/v0.5.0)
+for the full migration.
+
 ## What you get
 
 - **Presence at a glance** — a spinner for working, ⚠ for "needs you", ◐ for
