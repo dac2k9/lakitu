@@ -2099,7 +2099,7 @@ fn render_help_overlay(frame: &mut Frame, app: &mut App) {
             Style::default().add_modifier(Modifier::BOLD),
         )]),
         Line::from(""),
-        Line::from("Live feed of agent activity. Tails ~/.claude/logs/agent-actions.log."),
+        Line::from("Live feed of agent activity. Tails the fleet action log (agent-actions.log)."),
         Line::from(""),
         Line::from(vec![Span::styled(
             "Clients pane",

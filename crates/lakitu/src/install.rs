@@ -53,7 +53,7 @@ const WIRING: &[(&str, &str, Option<&str>)] = &[
 pub fn run() -> Result<()> {
     let home = home_dir()?;
     let claude = home.join(".claude");
-    let fleet = fleet_root(&home);
+    let fleet = fleet_root();
 
     // 1. Hook scripts → the fleet store dir (executable).
     std::fs::create_dir_all(&fleet).with_context(|| format!("creating {}", fleet.display()))?;
@@ -91,15 +91,13 @@ fn home_dir() -> Result<PathBuf> {
         .context("HOME is not set")
 }
 
-/// `$LAKITU_FLEET_ROOT` (also honoring the legacy `$GENBOT_ROOT`) or the default
-/// `~/.claude/lakitu-fleet`.
-fn fleet_root(home: &Path) -> PathBuf {
-    for var in ["LAKITU_FLEET_ROOT", "GENBOT_ROOT"] {
-        if let Some(v) = std::env::var_os(var).filter(|v| !v.is_empty()) {
-            return PathBuf::from(v);
-        }
-    }
-    home.join(".claude").join("lakitu-fleet")
+/// Where the installer materializes the hook scripts and wires `settings.json`.
+/// Delegates to [`crate::paths::fleet_store_root`]: an explicit
+/// `$LAKITU_FLEET_ROOT` / `$GENBOT_ROOT` override, else the XDG state dir
+/// (`$XDG_STATE_HOME/lakitu/fleet`) with a legacy `~/.claude/lakitu-fleet`
+/// fallback so an existing fleet keeps its hooks in place.
+fn fleet_root() -> PathBuf {
+    crate::paths::fleet_store_root()
 }
 
 #[cfg(unix)]

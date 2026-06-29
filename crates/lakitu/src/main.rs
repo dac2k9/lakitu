@@ -35,12 +35,14 @@ struct Cli {
     command: Option<Command>,
 
     /// Path to the agent activity log. Defaults to
-    /// `$HOME/.claude/logs/agent-actions.log`.
+    /// `$XDG_STATE_HOME/lakitu/logs/agent-actions.log` (legacy:
+    /// `~/.claude/logs/agent-actions.log`).
     #[arg(long, short = 'l', env = "AGENT_LOG")]
     log: Option<PathBuf>,
 
     /// Path to the fleet multi-agent store directory (agents registry +
-    /// inboxes). Defaults to `$HOME/.claude/lakitu-fleet`.
+    /// inboxes). Defaults to `$XDG_STATE_HOME/lakitu/fleet` (legacy:
+    /// `~/.claude/lakitu-fleet`).
     #[arg(long, env = "LAKITU_FLEET_STORE")]
     store: Option<PathBuf>,
 
@@ -150,7 +152,7 @@ async fn run_mcp_stdio() -> anyhow::Result<()> {
 
     // tracing goes to a side-channel file because in stdio mode stdout is
     // reserved for the JSON-RPC wire. macOS' temp_dir lands in /var/folders/...;
-    // fine for dev. If we ever want persistent logs, switch to ~/.claude/logs.
+    // fine for dev. If we ever want persistent logs, switch to the XDG state dir.
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -306,11 +308,7 @@ fn image_test(path: &std::path::Path) -> Result<()> {
 }
 
 fn default_log_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home)
-        .join(".claude")
-        .join("logs")
-        .join("agent-actions.log")
+    lakitu::paths::agent_actions_log()
 }
 
 /// One-shot text dump of the fleet store. Mirrors what the agents pane +

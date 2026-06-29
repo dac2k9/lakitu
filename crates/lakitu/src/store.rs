@@ -1,13 +1,14 @@
-//! Reader for the fleet multi-agent store (`~/.claude/lakitu-fleet/`).
+//! Reader for the fleet multi-agent store (`$XDG_STATE_HOME/lakitu/fleet/`,
+//! legacy `~/.claude/lakitu-fleet/`; resolved by [`crate::paths`]).
 //!
 //! See `DESIGN.md` for the on-disk contract. This module is read-only —
-//! the write side lives in the `lakitu-mcp` MCP. We poll the store on
+//! the write side lives in the MCP/daemon (`fleet.rs`). We poll the store on
 //! the same cadence as the log tailer (`log.rs`) and emit a fresh
 //! [`StoreSnapshot`] on the channel whenever anything changed.
 //!
-//! Layout recap:
+//! Layout recap (under the resolved store root):
 //! ```text
-//! ~/.claude/lakitu-fleet/
+//!   <store-root>/
 //!   agents/<name>.json            registry  {name, repo, board, started}
 //!   agents/<name>.heartbeat.json  presence  {ts, state, task}
 //!   inbox/<name>/<ts>-<id>.json   unread message {id, time, from, title, body}
@@ -328,10 +329,11 @@ struct TaskPrFile {
     number: u64,
 }
 
-/// Default store root: `$HOME/.claude/lakitu-fleet`.
+/// Default store root the TUI reads from. Resolves via [`crate::paths`]: the
+/// XDG state dir (`$XDG_STATE_HOME/lakitu/fleet`) with a legacy
+/// `~/.claude/lakitu-fleet` fallback, or an explicit `$LAKITU_FLEET_ROOT`.
 pub fn default_store_root() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".claude").join("lakitu-fleet")
+    crate::paths::fleet_store_root()
 }
 
 /// Where the poller reads the fleet from: the local store directory, or a

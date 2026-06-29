@@ -13,9 +13,10 @@
     3. launchctl load -w ~/Library/LaunchAgents/com.lakitu.daemon.plist
     4. launchctl list | grep lakitu   # confirm it's running (PID, exit 0)
 
-  HOME is set so the daemon resolves the real store at $HOME/.claude/lakitu-fleet
-  (store_root() honors LAKITU_FLEET_ROOT first, then $HOME). KeepAlive restarts
-  it on crash; RunAtLoad starts it at login.
+  HOME is set so the daemon resolves the real store at
+  $HOME/.local/state/lakitu/fleet (store_root() honors LAKITU_FLEET_ROOT first,
+  then the XDG state dir, then a legacy ~/.claude/lakitu-fleet). KeepAlive
+  restarts it on crash; RunAtLoad starts it at login.
 -->
 <plist version="1.0">
 <dict>
@@ -49,8 +50,8 @@
 
   <!-- Panics / startup errors. Live logs go to $TMPDIR/lakitu-mcp.log (tracing). -->
   <key>StandardOutPath</key>
-  <string>/Users/YOU/.claude/lakitu-fleet/daemon.out.log</string>
+  <string>/Users/YOU/.local/state/lakitu/fleet/daemon.out.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/YOU/.claude/lakitu-fleet/daemon.err.log</string>
+  <string>/Users/YOU/.local/state/lakitu/fleet/daemon.err.log</string>
 </dict>
 </plist>

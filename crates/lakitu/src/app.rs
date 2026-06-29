@@ -2277,11 +2277,7 @@ fn append_acknowledgement(key: WorkKey) -> std::io::Result<()> {
 }
 
 fn audit_log_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    std::path::PathBuf::from(home)
-        .join(".claude")
-        .join("logs")
-        .join("agent-actions.log")
+    crate::paths::agent_actions_log()
 }
 
 #[cfg(test)]

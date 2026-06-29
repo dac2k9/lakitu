@@ -7,8 +7,18 @@
 #
 # Wire it up in ~/.claude/settings.json:
 #   "statusLine": { "type": "command",
-#     "command": "sh '$HOME/.claude/lakitu-fleet/context-statusline.sh'" }
-ROOT="${LAKITU_FLEET_ROOT:-${GENBOT_ROOT:-$HOME/.claude/lakitu-fleet}}"
+#     "command": "sh '$HOME/.local/state/lakitu/fleet/context-statusline.sh'" }
+# (`lakitu install-hooks` writes this path for you.)
+# Resolve the fleet store root: an explicit $LAKITU_FLEET_ROOT / $GENBOT_ROOT
+# wins; otherwise the XDG state dir, falling back to the pre-XDG
+# ~/.claude/lakitu-fleet when it already exists (don't orphan a running fleet).
+ROOT="${LAKITU_FLEET_ROOT:-${GENBOT_ROOT:-}}"
+if [ -z "$ROOT" ]; then
+  _xdg="${XDG_STATE_HOME:-$HOME/.local/state}/lakitu/fleet"
+  if [ -d "$_xdg" ]; then ROOT="$_xdg"
+  elif [ -d "$HOME/.claude/lakitu-fleet" ]; then ROOT="$HOME/.claude/lakitu-fleet"
+  else ROOT="$_xdg"; fi
+fi
 PINNED="${LAKITU_FLEET_NAME:-${GENBOT_NAME:-}}"
 PAYLOAD=$(cat)
 

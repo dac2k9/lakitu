@@ -6,7 +6,7 @@ user-invokable: false
 
 # fleet-coordination
 
-How an agent joins the multi-agent fleet and coordinates with peers. The presence you report and the messages you exchange are rendered live in the `lakitu` TUI (agents pane + per-agent inboxes), so the supervisor can see every agent's state and inbox at a glance. Everything runs through the `lakitu-mcp` MCP writing the shared `~/.claude/lakitu-fleet/` store — no daemon, no sockets.
+How an agent joins the multi-agent fleet and coordinates with peers. The presence you report and the messages you exchange are rendered live in the `lakitu` TUI (agents pane + per-agent inboxes), so the supervisor can see every agent's state and inbox at a glance. Everything runs through the `lakitu mcp` MCP writing the shared fleet store (`$XDG_STATE_HOME/lakitu/fleet/`, legacy `~/.claude/lakitu-fleet/`) — no daemon, no sockets.
 
 This is **optional plumbing**: if `lakitu-mcp` isn't connected (`/mcp` to check), skip it entirely — your core work still runs. When it is connected and you're one of several agents, participate so the fleet stays visible and reachable.
 
@@ -121,7 +121,15 @@ A `Stop` hook checks your inbox whenever you're about to go idle: if unread mess
 Use Claude Code's **`Monitor`** tool, run `persistent`: a background shell loop that emits one event per new inbox message, which **re-invokes you even while you're idle** (the event is not the user's reply). On each event, `read_inbox(name)` and triage. Recipe — substitute your own `<name>` (the same name you registered / exported as `LAKITU_FLEET_NAME`):
 
 ```sh
-DIR="$HOME/.claude/lakitu-fleet/inbox/<name>"; mkdir -p "$DIR"
+# Resolve the fleet store root (XDG state dir, legacy fallback; $LAKITU_FLEET_ROOT wins).
+ROOT="${LAKITU_FLEET_ROOT:-${GENBOT_ROOT:-}}"
+if [ -z "$ROOT" ]; then
+  xdg="${XDG_STATE_HOME:-$HOME/.local/state}/lakitu/fleet"
+  if [ -d "$xdg" ]; then ROOT="$xdg"
+  elif [ -d "$HOME/.claude/lakitu-fleet" ]; then ROOT="$HOME/.claude/lakitu-fleet"
+  else ROOT="$xdg"; fi
+fi
+DIR="$ROOT/inbox/<name>"; mkdir -p "$DIR"
 seen="$(ls -1 "$DIR"/*.json 2>/dev/null | sort)"
 while true; do
   cur="$(ls -1 "$DIR"/*.json 2>/dev/null | sort)"

@@ -16,8 +16,14 @@ trivially inspectable.
 
 ## Store layout
 
+The store root resolves to `$XDG_STATE_HOME/lakitu/fleet` (default
+`~/.local/state/lakitu/fleet`), per the XDG Base Directory spec — this is
+*state*, not config or cache. An existing pre-XDG `~/.claude/lakitu-fleet` keeps
+being used when it's present (no auto-migration), and `$LAKITU_FLEET_ROOT`
+overrides everything. All resolution lives in `src/paths.rs`.
+
 ```
-~/.claude/lakitu-fleet/
+<store-root>/                # $XDG_STATE_HOME/lakitu/fleet (legacy ~/.claude/lakitu-fleet)
   agents/
     <name>.json              # registry — written once at register time
     <name>.heartbeat.json    # presence — rewritten on every heartbeat
@@ -46,11 +52,11 @@ trivially inspectable.
 }
 ```
 `path` is the agent's local checkout dir, recorded at registration so the
-optional inbox-waker (`~/.claude/lakitu-fleet/waker.sh`, toggled from the cockpit with
+optional inbox-waker (`<store-root>/waker.sh`, toggled from the cockpit with
 `w`) can relaunch a *stopped* agent there when mail arrives.
 `kind` is `agent` (default, omittable) or `human` — the supervisor running the
 cockpit registers as a `human` "client" (written by the TUI, not the MCP). The
-cockpit also keeps the human's chosen name in `~/.claude/lakitu-fleet/me`. Humans
+cockpit also keeps the human's chosen name in `<store-root>/me`. Humans
 render at the top of the roster, never go stale, and have no work-state.
 `repo` and `board` are free-form labels (#7). `board` convention:
 `<owner>/<projectNumber>`. `description` is a stable, self-authored capability

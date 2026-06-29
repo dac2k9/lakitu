@@ -25,6 +25,7 @@ pub mod fleet;
 pub mod gh;
 pub mod install;
 pub mod log;
+pub mod paths;
 pub mod persona;
 pub mod remote;
 pub mod rest;

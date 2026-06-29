@@ -30,8 +30,9 @@ a shared on-disk store; the cockpit renders it live.
   └──────────────────┘              │
         │  writes                   │ reads
         ▼                           │
-   ~/.claude/lakitu-fleet/  ◀───────┘   (shared store: registry, inboxes,
-                                          tasks, personas, presence)
+   $XDG_STATE_HOME/lakitu/  ◀───────┘   (shared store: registry, inboxes,
+        fleet/                            tasks, personas, presence;
+                                          legacy: ~/.claude/lakitu-fleet)
 ```
 
 One binary, `lakitu`, with subcommands:
@@ -111,7 +112,8 @@ for the full migration.
 
 | Variable | Used by | Meaning |
 |---|---|---|
-| `LAKITU_FLEET_ROOT` | all | Store location (default `~/.claude/lakitu-fleet`). |
+| `LAKITU_FLEET_ROOT` | all | Store location. Default: `$XDG_STATE_HOME/lakitu/fleet` (i.e. `~/.local/state/lakitu/fleet`), falling back to the legacy `~/.claude/lakitu-fleet` when it already exists. |
+| `XDG_STATE_HOME` | all | Base for the default store + logs (per the XDG Base Directory spec; defaults to `~/.local/state`). |
 | `LAKITU_FLEET_NAME` | hooks/agents | This agent's stable name. |
 | `LAKITU_DEFAULT_OWNER` | lakitu | *Optional* override for the owner prepended to bare repo names. By default the owner is inferred from the registered agents' repos, so this is rarely needed. |
 | `LAKITU_DEFAULT_REPO` | lakitu mcp/serve | `owner/name` default for board tools. |

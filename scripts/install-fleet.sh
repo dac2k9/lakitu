@@ -11,10 +11,19 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-HOOKS_SRC="$REPO/crates/lakitu-mcp/assets/hooks"
-SKILL_SRC="$REPO/crates/lakitu-mcp/assets/skill/fleet-coordination/SKILL.md"
+HOOKS_SRC="$REPO/crates/lakitu/assets/hooks"
+SKILL_SRC="$REPO/crates/lakitu/assets/skill/fleet-coordination/SKILL.md"
 
-FLEET="${LAKITU_FLEET_ROOT:-$HOME/.claude/lakitu-fleet}"
+# Fleet store root: an explicit $LAKITU_FLEET_ROOT / $GENBOT_ROOT wins; otherwise
+# the XDG state dir, falling back to the pre-XDG ~/.claude/lakitu-fleet when it
+# already exists (don't orphan a running fleet on upgrade).
+FLEET="${LAKITU_FLEET_ROOT:-${GENBOT_ROOT:-}}"
+if [ -z "$FLEET" ]; then
+  XDG="${XDG_STATE_HOME:-$HOME/.local/state}/lakitu/fleet"
+  if [ -d "$XDG" ]; then FLEET="$XDG"
+  elif [ -d "$HOME/.claude/lakitu-fleet" ]; then FLEET="$HOME/.claude/lakitu-fleet"
+  else FLEET="$XDG"; fi
+fi
 SKILL_DST="$HOME/.claude/skills/fleet-coordination"
 SETTINGS="$HOME/.claude/settings.json"
 

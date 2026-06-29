@@ -18,6 +18,17 @@ case "$input" in
   *'"stop_hook_active":true'* | *'"stop_hook_active": true'*) exit 0 ;;
 esac
 
+# Resolve the fleet store root: an explicit $LAKITU_FLEET_ROOT / $GENBOT_ROOT
+# wins; otherwise the XDG state dir, falling back to the pre-XDG
+# ~/.claude/lakitu-fleet when it already exists (don't orphan a running fleet).
+ROOT="${LAKITU_FLEET_ROOT:-${GENBOT_ROOT:-}}"
+if [ -z "$ROOT" ]; then
+  _xdg="${XDG_STATE_HOME:-$HOME/.local/state}/lakitu/fleet"
+  if [ -d "$_xdg" ]; then ROOT="$_xdg"
+  elif [ -d "$HOME/.claude/lakitu-fleet" ]; then ROOT="$HOME/.claude/lakitu-fleet"
+  else ROOT="$_xdg"; fi
+fi
+
 # Resolve this agent's fleet name (its inbox/registry key). Names are now
 # free-picked, so we can't just assume name == repo short-name:
 #   1) $LAKITU_FLEET_NAME if exported — the source of truth. Covers names that
@@ -37,11 +48,11 @@ if [ -z "$name" ]; then
     [ -n "$top" ] || top="$PWD"
     short="$(basename "$top" 2>/dev/null || true)"
   fi
-  name="$(LAKITU_FLEET_SHORT="$short" python3 - <<'PY' 2>/dev/null || true
+  name="$(LAKITU_FLEET_SHORT="$short" LAKITU_FLEET_AGENTS="$ROOT/agents" python3 - <<'PY' 2>/dev/null || true
 import os, json, glob
 short = os.environ.get("LAKITU_FLEET_SHORT", "")
 match = ""
-for f in glob.glob(os.path.expanduser("~/.claude/lakitu-fleet/agents/*.json")):
+for f in glob.glob(os.path.join(os.environ.get("LAKITU_FLEET_AGENTS", ""), "*.json")):
     if f.endswith(".heartbeat.json"):
         continue
     try:
@@ -70,7 +81,7 @@ fi
 if [ -z "${LAKITU_FLEET_NAME:-${GENBOT_NAME:-}}" ]; then
   here="$(git rev-parse --show-toplevel 2>/dev/null || true)"
   [ -n "$here" ] || here="$PWD"
-  suppress="$(LAKITU_NAME_CHK="$name" LAKITU_SHORT_CHK="$short" LAKITU_HERE="$here" python3 - <<'PY' 2>/dev/null || true
+  suppress="$(LAKITU_NAME_CHK="$name" LAKITU_SHORT_CHK="$short" LAKITU_HERE="$here" LAKITU_FLEET_AGENTS="$ROOT/agents" python3 - <<'PY' 2>/dev/null || true
 import os, json, glob
 def sanitize(n):
     out = "".join(c if (c.isalnum() and ord(c) < 128) or c in "._-" else "-" for c in n)
@@ -78,7 +89,7 @@ def sanitize(n):
 name = sanitize(os.environ.get("LAKITU_NAME_CHK", ""))
 short = os.environ.get("LAKITU_SHORT_CHK", "")
 here = os.path.realpath(os.environ.get("LAKITU_HERE", "") or ".")
-agents = os.path.expanduser("~/.claude/lakitu-fleet/agents")
+agents = os.environ.get("LAKITU_FLEET_AGENTS", "")
 # Ambiguous: more than one agent registered for this repo short-name.
 matches = 0
 for f in glob.glob(os.path.join(agents, "*.json")):
@@ -119,7 +130,7 @@ except Exception: print(0)' 2>/dev/null || echo 0)"
   exit 0
 fi
 
-inbox="$HOME/.claude/lakitu-fleet/inbox/$name"
+inbox="$ROOT/inbox/$name"
 [ -d "$inbox" ] || exit 0   # not a registered participant → nothing to do
 
 # Count unread messages (top-level *.json; the read/ archive is a subdir).

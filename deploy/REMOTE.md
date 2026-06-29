@@ -1,6 +1,8 @@
 # Running the fleet across machines
 
-By default the fleet is a shared local directory (`~/.claude/lakitu-fleet/`) and
+By default the fleet is a shared local directory (`$XDG_STATE_HOME/lakitu/fleet/`,
+i.e. `~/.local/state/lakitu/fleet/`; legacy installs keep using
+`~/.claude/lakitu-fleet/`) and
 everything — the `lakitu-mcp` MCP, the cockpit, the hooks — reads/writes it
 directly. To pool clients across machines, run **one daemon** on a host that
 owns that store and have remote machines talk to it over HTTP.
@@ -13,7 +15,7 @@ using the local store exactly as before. Remote mode is opt-in per machine.
   ┌────────────────────────┐            ┌───────────────────────────┐
   │ Claude Code agent       │  MCP/HTTP │  lakitu-mcp serve          │
   │  .mcp.json → http /mcp  │──────────▶│   /mcp   (agent tools)     │
-  │ hooks → /v1 (curl)      │           │   /v1/*  (hooks + cockpit) │──▶ ~/.claude/lakitu-fleet
+  │ hooks → /v1 (curl)      │           │   /v1/*  (hooks + cockpit) │──▶ ~/.local/state/lakitu/fleet
   └────────────────────────┘           └───────────────────────────┘
   ┌────────────────────────┐                        ▲
   │ cockpit  lakitu --server│────────────────────────┘  GET /v1/snapshot + writes
@@ -45,7 +47,7 @@ LAKITU_FLEET_TOKEN=secret LAKITU_FLEET_LISTEN=127.0.0.1:8787 \
 ```
 
 `serve` reuses the same 23 MCP tools as stdio mode and serves the local
-`~/.claude/lakitu-fleet/` store. Stdio mode (no subcommand) is unchanged, so
+`$XDG_STATE_HOME/lakitu/fleet/` store. Stdio mode (no subcommand) is unchanged, so
 local agents on the host keep working without the daemon.
 
 ## 2. Make it reachable (pick one)
@@ -94,9 +96,9 @@ work remotely (they detect `$LAKITU_FLEET_SERVER` and curl the daemon, falling
 back to the local store when it's unset):
 
 ```sh
-mkdir -p ~/.claude/lakitu-fleet
-scp <host>:~/.claude/lakitu-fleet/'{state-hook,inbox-check,context-statusline,persona-sessionstart}.sh' \
-    ~/.claude/lakitu-fleet/
+DST="${XDG_STATE_HOME:-$HOME/.local/state}/lakitu/fleet"
+mkdir -p "$DST"
+scp <host>:"$DST"/'{state-hook,inbox-check,context-statusline,persona-sessionstart}.sh' "$DST"/
 # then add the same hooks{} + statusLine blocks to this machine's ~/.claude/settings.json
 ```
 
@@ -137,5 +139,5 @@ lakitu --server http://<host>:8787 --token secret --dump-store
   TLS proxy + network ACLs.
 - **Names:** remote agents must `export LAKITU_FLEET_NAME` (the hooks can't infer
   it from a local registry that isn't there).
-- **Logs:** launchd → `~/.claude/lakitu-fleet/daemon.{out,err}.log`; live tracing
+- **Logs:** launchd → `~/.local/state/lakitu/fleet/daemon.{out,err}.log`; live tracing
   → `$TMPDIR/lakitu-mcp.log`.

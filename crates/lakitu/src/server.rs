@@ -308,7 +308,7 @@ impl AgentBoardService {
 
     #[tool(
         name = "emit_event",
-        description = "Append one structured row to ~/.claude/logs/agent-actions.log. \
+        description = "Append one structured row to the fleet action log (agent-actions.log). \
         Use instead of the bash `log_event` helper — this tool enforces the tab-separated \
         format, ISO-8601 timestamps with timezone offset, and strips control characters. \
         `details` is rendered as space-separated `key=value` pairs in a stable order \
@@ -968,15 +968,16 @@ impl AgentBoardService {
 
     // ---- fleet multi-agent coordination -------------------------------
     //
-    // These write the shared `~/.claude/lakitu-fleet/` store that the
-    // `lakitu` TUI renders (agents pane + inboxes). See
-    // `src/fleet.rs` and `lakitu/DESIGN.md` for the contract.
+    // These write the shared fleet store ($XDG_STATE_HOME/lakitu/fleet, legacy
+    // ~/.claude/lakitu-fleet; resolved by `paths.rs`) that the `lakitu` TUI
+    // renders (agents pane + inboxes). See `src/fleet.rs` and
+    // `lakitu/DESIGN.md` for the contract.
 
     #[tool(
         name = "register_agent",
         description = "Register this agent in the shared fleet store so it shows up in the \
         lakitu TUI agents pane and is visible to peers via `list_agents`. Writes \
-        ~/.claude/lakitu-fleet/agents/<name>.json and creates the agent's inbox. Call once at \
+        <store>/agents/<name>.json and creates the agent's inbox. Call once at \
         startup. `name` is your stable identity + address — a human-friendly handle (kebab-case), \
         free to pick (need not match the repo), but keep it consistent and export it as \
         LAKITU_FLEET_NAME so the inbox/presence hooks find you. `role` is a short function label \
@@ -1305,7 +1306,7 @@ impl AgentBoardService {
     #[tool(
         name = "set_identity",
         description = "Save (or update) THIS agent's persona — the self-card that makes you *you* \
-        across sessions. Persisted to ~/.claude/lakitu-fleet/personas/<name>/ and auto-loaded back \
+        across sessions. Persisted to <store>/personas/<name>/ and auto-loaded back \
         into your context at the start of every session (including after a compaction) by the \
         SessionStart hook, so you resume being the same character instead of re-inventing yourself \
         each time. `tagline` is a one-line essence (e.g. 'methodical backend gremlin, allergic to \
@@ -2528,11 +2529,7 @@ async fn append_audit_log(
 }
 
 fn audit_log_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    std::path::PathBuf::from(home)
-        .join(".claude")
-        .join("logs")
-        .join("agent-actions.log")
+    crate::paths::agent_actions_log()
 }
 
 // ---- Sweep helpers ---------------------------------------------------------

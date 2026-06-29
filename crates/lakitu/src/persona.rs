@@ -1,7 +1,8 @@
 //! Persona store — each agent's self-authored identity and private notes on
-//! peers, persisted under `~/.claude/lakitu-fleet/personas/<name>/` so an
-//! agent's chosen name, character, and relationships survive across sessions
-//! (and across compaction).
+//! peers, persisted under `<store-root>/personas/<name>/` (the store root is
+//! resolved by [`crate::paths`]: `$XDG_STATE_HOME/lakitu/fleet`, legacy
+//! `~/.claude/lakitu-fleet`) so an agent's chosen name, character, and
+//! relationships survive across sessions (and across compaction).
 //!
 //! Read side: the SessionStart hook (`persona-sessionstart.sh`) injects an
 //! agent's identity + peer-notes back into context at the start of every
@@ -9,9 +10,9 @@
 //! instead of re-inventing a character each time.
 //! Write side: the MCP persona tools call the helpers here.
 //!
-//! Layout:
+//! Layout (under the resolved store root):
 //! ```text
-//! ~/.claude/lakitu-fleet/personas/<name>/
+//!   <store-root>/personas/<name>/
 //!   identity.md      self-card prose (PUBLIC — peers read it via get_identity)
 //!   identity.json    structured mirror { name, tagline, bio, updated }
 //!   peers/<peer>.md  PRIVATE, append-only notes on one peer (+ affinity)
@@ -295,6 +296,9 @@ mod tests {
             // A dev's exported root override would otherwise hijack the temp store.
             std::env::remove_var("LAKITU_FLEET_ROOT");
             std::env::remove_var("GENBOT_ROOT");
+            // Keep the XDG store under the temp HOME (a dev's real
+            // $XDG_STATE_HOME would otherwise leak in and break isolation).
+            std::env::remove_var("XDG_STATE_HOME");
         }
 
         // Full card, then a partial update that must preserve the bio.

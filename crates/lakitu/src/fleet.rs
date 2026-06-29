@@ -1,4 +1,5 @@
-//! Write side of the fleet multi-agent store (`~/.claude/lakitu-fleet/`).
+//! Write side of the fleet multi-agent store (`$XDG_STATE_HOME/lakitu/fleet/`,
+//! legacy `~/.claude/lakitu-fleet/`; resolved by [`crate::paths`]).
 //!
 //! Mirror of the on-disk contract documented in
 //! `~/src/lakitu/DESIGN.md`. The `lakitu` TUI is the reader;
@@ -6,9 +7,9 @@
 //! (`register_agent`, `heartbeat`, `send_message`, `read_inbox`,
 //! `list_agents`).
 //!
-//! Layout:
+//! Layout (under the resolved store root):
 //! ```text
-//! ~/.claude/lakitu-fleet/
+//!   <store-root>/
 //!   agents/<name>.json            registry
 //!   agents/<name>.heartbeat.json  presence
 //!   inbox/<name>/<ts>-<id>.json   unread message
@@ -52,20 +53,12 @@ fn short_id(counter: &AtomicU64) -> String {
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(crate) fn store_root() -> PathBuf {
-    // An explicit root override wins, so the daemon (and any relocated/remote
-    // store) can be pointed somewhere other than the default. This matches the
-    // cockpit's `LAKITU_FLEET_STORE` and the shell hooks' `LAKITU_FLEET_ROOT`,
-    // unifying a contract that had drifted (the MCP previously had no override
-    // at all). Legacy `GENBOT_ROOT` is honored for back-compat.
-    for var in ["LAKITU_FLEET_ROOT", "GENBOT_ROOT"] {
-        if let Ok(v) = std::env::var(var) {
-            if !v.is_empty() {
-                return PathBuf::from(v);
-            }
-        }
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".claude").join("lakitu-fleet")
+    // Single source of truth in `paths`: an explicit `LAKITU_FLEET_ROOT` /
+    // `GENBOT_ROOT` override wins (daemon, relocated/remote store, tests),
+    // otherwise the XDG state dir with a legacy `~/.claude/lakitu-fleet`
+    // fallback. The reader (`store::default_store_root`) delegates to the same
+    // helper, so writers and reader can't drift.
+    crate::paths::fleet_store_root()
 }
 
 /// Make an agent name safe to use as a path component. Keeps
@@ -1818,6 +1811,9 @@ mod tests {
             std::env::set_var("HOME", &home);
             std::env::remove_var("LAKITU_FLEET_ROOT");
             std::env::remove_var("GENBOT_ROOT");
+            // Keep the XDG store under the temp HOME (a dev's real
+            // $XDG_STATE_HOME would otherwise leak in and break isolation).
+            std::env::remove_var("XDG_STATE_HOME");
         }
 
         register("alice", "acme/api", "acme/14", None, None)
@@ -1880,12 +1876,12 @@ mod tests {
         // Sidecar files sitting next to the registry must NOT be read as agents
         // (else they'd phantom "alice.wake" / "alice.context" entries).
         std::fs::write(
-            home.join(".claude/lakitu-fleet/agents/alice.wake.json"),
+            home.join(".local/state/lakitu/fleet/agents/alice.wake.json"),
             br#"{"mode":"codex-app-server","wake_cmd":""}"#,
         )
         .unwrap();
         std::fs::write(
-            home.join(".claude/lakitu-fleet/agents/alice.context.json"),
+            home.join(".local/state/lakitu/fleet/agents/alice.context.json"),
             br#"{"pct":42}"#,
         )
         .unwrap();
@@ -1916,7 +1912,7 @@ mod tests {
         assert!(again.is_empty(), "message should have moved to read/");
 
         // notify_supervisor finds the human client and recaps to them.
-        let agents_dir = home.join(".claude/lakitu-fleet/agents");
+        let agents_dir = home.join(".local/state/lakitu/fleet/agents");
         std::fs::write(
             agents_dir.join("you.json"),
             r#"{"name":"you","kind":"human"}"#,
@@ -1941,7 +1937,7 @@ mod tests {
         );
         assert!(!agents.iter().any(|a| a.name == "alice"), "old entry gone");
         assert!(
-            home.join(".claude/lakitu-fleet/inbox/alice-2/read")
+            home.join(".local/state/lakitu/fleet/inbox/alice-2/read")
                 .exists(),
             "read archive moved with the rename"
         );
@@ -1976,6 +1972,9 @@ mod tests {
             std::env::set_var("HOME", &home);
             std::env::remove_var("LAKITU_FLEET_ROOT");
             std::env::remove_var("GENBOT_ROOT");
+            // Keep the XDG store under the temp HOME (a dev's real
+            // $XDG_STATE_HOME would otherwise leak in and break isolation).
+            std::env::remove_var("XDG_STATE_HOME");
         }
 
         // Empty to start.
@@ -2050,6 +2049,9 @@ mod tests {
             std::env::set_var("HOME", &home);
             std::env::remove_var("LAKITU_FLEET_ROOT");
             std::env::remove_var("GENBOT_ROOT");
+            // Keep the XDG store under the temp HOME (a dev's real
+            // $XDG_STATE_HOME would otherwise leak in and break isolation).
+            std::env::remove_var("XDG_STATE_HOME");
         }
 
         // Empty to start.
@@ -2164,6 +2166,9 @@ mod tests {
             std::env::set_var("HOME", &home);
             std::env::remove_var("LAKITU_FLEET_ROOT");
             std::env::remove_var("GENBOT_ROOT");
+            // Keep the XDG store under the temp HOME (a dev's real
+            // $XDG_STATE_HOME would otherwise leak in and break isolation).
+            std::env::remove_var("XDG_STATE_HOME");
         }
 
         let st = create_shared_task("lakitu", "Archive me", None, TaskScope::Fleet, None)
@@ -2215,6 +2220,9 @@ mod tests {
             std::env::set_var("HOME", &home);
             std::env::remove_var("LAKITU_FLEET_ROOT");
             std::env::remove_var("GENBOT_ROOT");
+            // Keep the XDG store under the temp HOME (a dev's real
+            // $XDG_STATE_HOME would otherwise leak in and break isolation).
+            std::env::remove_var("XDG_STATE_HOME");
         }
 
         // A real task to coexist with the bad files below.
@@ -2294,6 +2302,9 @@ mod tests {
             std::env::set_var("HOME", &home);
             std::env::remove_var("LAKITU_FLEET_ROOT");
             std::env::remove_var("GENBOT_ROOT");
+            // Keep the XDG store under the temp HOME (a dev's real
+            // $XDG_STATE_HOME would otherwise leak in and break isolation).
+            std::env::remove_var("XDG_STATE_HOME");
         }
 
         let st = create_shared_task("lakitu", "Reconcile me", None, TaskScope::Fleet, None)
@@ -2349,6 +2360,9 @@ mod tests {
             std::env::set_var("HOME", &home);
             std::env::remove_var("LAKITU_FLEET_ROOT");
             std::env::remove_var("GENBOT_ROOT");
+            // Keep the XDG store under the temp HOME (a dev's real
+            // $XDG_STATE_HOME would otherwise leak in and break isolation).
+            std::env::remove_var("XDG_STATE_HOME");
         }
 
         let st = create_shared_task("lakitu", "Ship it", None, TaskScope::Fleet, None)
