@@ -10,7 +10,7 @@ use chrono::DateTime;
 use serde::Deserialize;
 
 use crate::store::{
-    Agent, AgentState, ClientKind, Message, Project, StoreSnapshot, Task, TaskPr, Usage,
+    Agent, AgentState, ClientKind, Message, OpenPr, Project, StoreSnapshot, Task, TaskPr, Usage,
 };
 
 /// A bearer-authenticated HTTP client for one daemon. Cheap to clone (the inner
@@ -365,6 +365,9 @@ struct SnapshotDto {
     /// `default` so a daemon predating tasks still deserializes.
     #[serde(default)]
     tasks: HashMap<String, Vec<TaskDto>>,
+    /// `default` so a daemon predating the open-PR roster still deserializes.
+    #[serde(default)]
+    agent_prs: HashMap<String, Vec<OpenPrDto>>,
     projects: Vec<ProjectDto>,
     usage: Option<UsageDto>,
 }
@@ -422,6 +425,16 @@ struct TaskDto {
 struct TaskPrDto {
     repo: String,
     number: u64,
+}
+
+#[derive(Deserialize)]
+struct OpenPrDto {
+    repo: String,
+    number: u64,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    state: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -516,6 +529,22 @@ impl SnapshotDto {
                 (name, ts)
             })
             .collect();
+        let open_prs = self
+            .agent_prs
+            .into_iter()
+            .map(|(name, prs)| {
+                let prs = prs
+                    .into_iter()
+                    .map(|p| OpenPr {
+                        repo: p.repo,
+                        number: p.number,
+                        title: p.title,
+                        state: p.state.filter(|s| !s.trim().is_empty()),
+                    })
+                    .collect();
+                (name, prs)
+            })
+            .collect();
         let usage = self.usage.map(|u| Usage {
             five_hour_pct: u.five_hour_pct,
             seven_day_pct: u.seven_day_pct,
@@ -527,6 +556,7 @@ impl SnapshotDto {
             agents,
             inboxes,
             tasks,
+            open_prs,
             projects,
             usage,
         }

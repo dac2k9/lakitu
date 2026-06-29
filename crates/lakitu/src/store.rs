@@ -186,6 +186,20 @@ pub struct Task {
     pub from_msg: Option<String>,
 }
 
+/// One open PR an agent has in flight — recorded at creation by the `open_pr`
+/// MCP tool (in `prs/<agent>.json`) and reconciled by the sweep (merged/closed
+/// dropped). Shown under its opening agent so the cockpit sees it by
+/// construction. Distinct from [`TaskPr`] (a PR a private task hangs off).
+#[derive(Debug, Clone)]
+pub struct OpenPr {
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    /// Cached GitHub state for the status pill: open/draft/merged/closed.
+    /// `None` until the sweep has observed it.
+    pub state: Option<String>,
+}
+
 /// Full picture of the store at one poll.
 #[derive(Debug, Clone, Default)]
 pub struct StoreSnapshot {
@@ -196,6 +210,9 @@ pub struct StoreSnapshot {
     pub inboxes: HashMap<String, Vec<Message>>,
     /// Tasks per agent name, in stored order (oldest first). Open + done.
     pub tasks: HashMap<String, Vec<Task>>,
+    /// Open PRs per agent name (recorded at creation by `open_pr`), stored
+    /// order. The roster holds only OPEN PRs — the sweep drops merged/closed.
+    pub open_prs: HashMap<String, Vec<OpenPr>>,
     /// Supervisor-defined projects (groupings of clients), in declared order.
     pub projects: Vec<Project>,
     /// Account rate-limit usage from the freshest agent's statusLine report
@@ -328,6 +345,18 @@ struct TaskPrFile {
     number: u64,
 }
 
+#[derive(Deserialize)]
+struct OpenPrFile {
+    #[serde(default)]
+    repo: String,
+    #[serde(default)]
+    number: u64,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    state: Option<String>,
+}
+
 /// Default store root: `$HOME/.claude/lakitu-fleet`.
 pub fn default_store_root() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -448,6 +477,10 @@ pub async fn read_snapshot(root: &Path) -> StoreSnapshot {
     // 5b. Tasks — one `tasks/<name>.json` array per agent. Missing dir ⇒ none.
     let tasks = read_tasks_dir(root).await;
 
+    // 5c. Open PRs — one `prs/<name>.json` array per agent, recorded at
+    //     creation by the `open_pr` tool. Missing dir ⇒ none.
+    let open_prs = read_open_prs_dir(root).await;
+
     // 6. Context/usage reports (per-agent `<name>.context.json`, written by the
     //    statusLine). Fold context% onto agents; take rate-limit usage from the
     //    freshest report (it's account-global).
@@ -476,6 +509,7 @@ pub async fn read_snapshot(root: &Path) -> StoreSnapshot {
         agents,
         inboxes,
         tasks,
+        open_prs,
         projects,
         usage: usage.map(|(_, u)| u),
     }
@@ -536,6 +570,55 @@ fn task_from_file(f: TaskFile) -> Task {
         }),
         from_msg: f.from_msg.filter(|m| !m.trim().is_empty()),
     }
+}
+
+/// Read every `prs/<name>.json` → open PRs keyed by agent name. Missing dir,
+/// unreadable or malformed files ⇒ that agent simply has no open PRs
+/// (best-effort, like the task reader). Drops entries with a blank repo.
+async fn read_open_prs_dir(root: &Path) -> HashMap<String, Vec<OpenPr>> {
+    let mut out: HashMap<String, Vec<OpenPr>> = HashMap::new();
+    let Ok(mut entries) = tokio::fs::read_dir(root.join("prs")).await else {
+        return out;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        if !entry
+            .file_type()
+            .await
+            .map(|t| t.is_file())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(String::from) else {
+            continue;
+        };
+        let Ok(raw) = tokio::fs::read_to_string(&path).await else {
+            continue;
+        };
+        match serde_json::from_str::<Vec<OpenPrFile>>(&raw) {
+            Ok(files) => {
+                let prs: Vec<OpenPr> = files
+                    .into_iter()
+                    .filter(|p| !p.repo.trim().is_empty())
+                    .map(|p| OpenPr {
+                        repo: p.repo,
+                        number: p.number,
+                        title: p.title,
+                        state: p.state.filter(|s| !s.trim().is_empty()),
+                    })
+                    .collect();
+                out.insert(stem, prs);
+            }
+            Err(err) => {
+                tracing::debug!(?err, path = %path.display(), "skipping malformed prs file")
+            }
+        }
+    }
+    out
 }
 
 /// The display/selection order for an agent's tasks: PR-linked tasks grouped by
@@ -742,6 +825,18 @@ fn fingerprint(snap: &StoreSnapshot) -> u64 {
             }
         }
     }
+    // Open-PR identity: per agent, each PR's {repo, number} + cached state, so
+    // a record / reconcile-drop / state-change re-renders the agents pane.
+    let mut pnames: Vec<&String> = snap.open_prs.keys().collect();
+    pnames.sort();
+    for name in pnames {
+        name.hash(&mut h);
+        for pr in &snap.open_prs[name] {
+            pr.repo.hash(&mut h);
+            pr.number.hash(&mut h);
+            pr.state.hash(&mut h);
+        }
+    }
     // Project identity: order, name, coordinator, membership.
     for p in &snap.projects {
         p.id.hash(&mut h);
@@ -917,6 +1012,52 @@ mod tests {
         let order = task_display_order(tasks);
         let ids: Vec<&str> = order.iter().map(|&i| tasks[i].id.as_str()).collect();
         assert_eq!(ids, vec!["t2", "t1", "t3"]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn reads_open_prs_per_agent() {
+        let root = scratch("open-prs");
+        write(
+            root.join("agents/aria.json"),
+            r#"{"name":"aria","repo":"acme/lakitu","board":"-"}"#,
+        );
+        // The `prs/<name>.json` roster written by the `open_pr` tool: state is
+        // optional (unset until reconciled) and a blank-repo entry is dropped.
+        write(
+            root.join("prs/aria.json"),
+            r#"[
+              {"repo":"acme/lakitu","number":12,"title":"wrapped-gh P1","url":"https://x/pull/12","state":"open","created":"2026-06-22T10:00:00+02:00"},
+              {"repo":"acme/lakitu","number":14,"title":"draft work","url":"https://x/pull/14","state":"draft","created":"2026-06-22T10:01:00+02:00"},
+              {"repo":"acme/lakitu","number":22,"title":"no state yet","url":"https://x/pull/22","created":"2026-06-22T10:02:00+02:00"},
+              {"repo":"","number":99,"title":"blank repo","url":"u","created":"2026-06-22T10:03:00+02:00"}
+            ]"#,
+        );
+
+        let snap = read_snapshot(&root).await;
+        let prs = snap
+            .open_prs
+            .get("aria")
+            .expect("aria has open PRs in the snapshot");
+        assert_eq!(prs.len(), 3, "blank-repo entry dropped");
+        assert_eq!(prs[0].number, 12);
+        assert_eq!(prs[0].state.as_deref(), Some("open"));
+        assert_eq!(prs[1].state.as_deref(), Some("draft"));
+        assert_eq!(prs[2].state, None, "unobserved state stays None");
+
+        // The fingerprint covers open PRs, so a roster change re-renders.
+        let fp_before = fingerprint(&snap);
+        write(
+            root.join("prs/aria.json"),
+            r#"[{"repo":"acme/lakitu","number":12,"title":"wrapped-gh P1","url":"https://x/pull/12","state":"merged","created":"2026-06-22T10:00:00+02:00"}]"#,
+        );
+        let snap2 = read_snapshot(&root).await;
+        assert_ne!(
+            fp_before,
+            fingerprint(&snap2),
+            "an open-PR state change changes the fingerprint"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

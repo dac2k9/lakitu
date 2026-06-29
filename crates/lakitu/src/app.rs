@@ -308,6 +308,11 @@ pub struct App {
     /// Tasks per agent name (stored order, oldest first), open + done. Rendered
     /// as a count badge + checklist in the agents pane and in the tasks modal.
     pub tasks: HashMap<String, Vec<Task>>,
+    /// Open PRs per agent name (recorded at creation by the `open_pr` MCP tool),
+    /// stored order. Rendered as a compact "open PRs: #N #M" row on the agent's
+    /// card so in-flight PRs are visible by construction. Open PRs only — the
+    /// sweep drops merged/closed.
+    pub open_prs: HashMap<String, Vec<crate::store::OpenPr>>,
     /// When `Some(name)`, the tasks modal is open for that client (`T` in the
     /// Clients pane). Cleared by `esc`.
     pub show_tasks_for: Option<String>,
@@ -443,6 +448,7 @@ impl App {
             roster: Vec::new(),
             inboxes: HashMap::new(),
             tasks: HashMap::new(),
+            open_prs: HashMap::new(),
             show_tasks_for: None,
             tasks_selected: 0,
             task_input: None,
@@ -1441,6 +1447,7 @@ async fn event_loop<B: ratatui::backend::Backend>(
                 app.ensure_repo_checks();
                 app.inboxes = snap.inboxes;
                 app.tasks = snap.tasks;
+                app.open_prs = snap.open_prs;
                 app.projects = snap.projects;
                 app.usage = snap.usage; // was missing → the session/weekly chip never showed
                 // Keep selections in range as the roster / inbox shrink.

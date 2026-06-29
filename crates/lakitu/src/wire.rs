@@ -23,6 +23,13 @@ pub struct SnapshotDto {
     /// agents, with participants and a Start→Goal timeline. Rendered by the web
     /// `/tasks` view; the TUI ignores them for now (unknown field → dropped).
     pub shared_tasks: Vec<SharedTaskDto>,
+    /// Per-agent open PRs, keyed by agent name — recorded at creation by the
+    /// wrapped `open_pr` tool and reconciled (merged/closed dropped) by the
+    /// sweep. Lets the cockpit show an agent's in-flight PRs by construction,
+    /// with no manual linking. Empty by default (serde-default), so an older
+    /// reader that doesn't know the field just drops it.
+    #[serde(default)]
+    pub agent_prs: BTreeMap<String, Vec<OpenPrDto>>,
     pub projects: Vec<ProjectDto>,
     pub usage: Option<UsageDto>,
 }
@@ -115,6 +122,20 @@ pub struct SharedTaskDto {
     pub created: String,
     /// RFC3339.
     pub updated: String,
+}
+
+/// One open PR an agent has in flight, recorded at creation by `open_pr` and
+/// reconciled by the sweep. Surfaced under its opening agent in `agent_prs`.
+#[derive(Serialize)]
+pub struct OpenPrDto {
+    /// `owner/name`.
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    /// Cached GitHub state for the status pill: "open" | "draft" | "merged" |
+    /// "closed". `None` until the reconcile sweep has observed it. (Merged/closed
+    /// are normally dropped from the roster, so a present value is open/draft.)
+    pub state: Option<String>,
 }
 
 /// A board issue or PR linked to a [`SharedTaskDto`].
