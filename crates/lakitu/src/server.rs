@@ -2715,11 +2715,18 @@ fn parse_created_url(stdout: &str) -> Result<(u64, String), McpError> {
                 .rsplit('/')
                 .next()
                 .and_then(|s| s.parse::<u64>().ok())
-                .ok_or_else(|| mcp(format!("could not parse number from `gh` output: {url:?}")))?;
+                .ok_or_else(|| {
+                    mcp(format!(
+                        "gh reported success but the number couldn't be parsed from its URL \
+                         ({url:?}) — the PR/issue MAY already exist; check before retrying."
+                    ))
+                })?;
             Ok((number, url.to_string()))
         }
         None => Err(mcp(format!(
-            "could not find a created issue/PR URL in `gh` output: {stdout:?}"
+            "gh reported success but no created issue/PR URL was found in its output — \
+             the PR/issue MAY already have been created. Do NOT blindly retry (it could \
+             duplicate); check the repo first. gh output: {stdout:?}"
         ))),
     }
 }
