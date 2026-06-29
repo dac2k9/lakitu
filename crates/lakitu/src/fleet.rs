@@ -148,6 +148,27 @@ pub struct Task {
     pub from_msg: Option<String>,
 }
 
+/// One PR an agent opened via `open_pr`, recorded at creation so the cockpit
+/// sees it by construction (no manual linking). Persisted in the per-agent list
+/// at `prs/<agent>.json`. The surface shows only OPEN PRs — the reconcile sweep
+/// refreshes `state` and drops merged/closed entries. Distinct from [`TaskPr`]
+/// (the single PR a private [`Task`] hangs off) and [`TaskRef`] (a PR a shared
+/// task groups): this is the agent's own roster of in-flight PRs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenPr {
+    /// `owner/name`.
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    /// Cached GitHub state for the status pill (open/draft/merged/closed).
+    /// `None` until the reconcile sweep has observed it. Merged/closed entries
+    /// are dropped from the list, so a stored `state` is normally open/draft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    pub created: String,
+}
+
 /// A reference to a board issue or PR that a [`SharedTask`] groups together:
 /// `owner/repo` + number. (Distinct from [`TaskPr`], the single PR a private
 /// per-agent [`Task`] hangs off in the cockpit.)
@@ -1363,6 +1384,158 @@ pub async fn agents_for_repo(repo: &str) -> Vec<String> {
         .collect()
 }
 
+/// An agent's registered repo (`owner/name`) from `agents/<name>.json`, or
+/// `None` if it isn't registered / has no repo. Lets `open_pr` default the
+/// target repo to the caller's own when they omit it. Best-effort (a missing or
+/// malformed registry just yields `None`).
+pub async fn agent_repo(name: &str) -> Option<String> {
+    let name = sanitize(name);
+    let path = store_root().join("agents").join(format!("{name}.json"));
+    let raw = fs::read_to_string(&path).await.ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v["repo"]
+        .as_str()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(String::from)
+}
+
+// ---- Open-PR roster (per-agent, recorded at creation by `open_pr`) ----------
+// One JSON array per agent at `prs/<agent>.json` — the agent's in-flight PRs,
+// recorded the moment `open_pr` succeeds so the cockpit sees them by
+// construction. Mutable (append on create, reconcile drops merged/closed), so
+// it's a single rewritten file like the per-agent task list, atomic via a tmp
+// rename. The surface shows only OPEN PRs.
+
+fn open_prs_path(name: &str) -> PathBuf {
+    store_root().join("prs").join(format!("{name}.json"))
+}
+
+/// Read one agent's open-PR list, in stored order (oldest first).
+/// Missing/unreadable/malformed ⇒ empty (best-effort, like the task reader).
+pub async fn read_open_prs(name: &str) -> Vec<OpenPr> {
+    let name = sanitize(name);
+    match fs::read_to_string(open_prs_path(&name)).await {
+        Ok(raw) => serde_json::from_str::<Vec<OpenPr>>(&raw).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Atomically rewrite an agent's open-PR list. `name` must already be sanitized.
+async fn write_open_prs(name: &str, prs: &[OpenPr]) -> Result<()> {
+    let dir = store_root().join("prs");
+    fs::create_dir_all(&dir).await?;
+    let path = dir.join(format!("{name}.json"));
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(prs)?).await?;
+    fs::rename(&tmp, &path).await?;
+    Ok(())
+}
+
+/// Record a PR an agent just opened. Appends to the agent's roster; idempotent on
+/// the normalized `{repo, number}` (re-recording the same PR updates its title/url
+/// in place rather than duplicating — same dedupe key as the shared-task link).
+/// Rejects a malformed repo so a bad slug never lands and then fails to reconcile.
+pub async fn record_open_pr(
+    agent: &str,
+    repo: &str,
+    number: u64,
+    title: &str,
+    url: &str,
+) -> Result<()> {
+    let agent = sanitize(agent);
+    let repo = repo.trim().to_string();
+    if !is_repo_slug(&repo) {
+        bail!("PR repo must look like 'owner/name'");
+    }
+    let mut prs = read_open_prs(&agent).await;
+    let title = title.trim().to_string();
+    let url = url.trim().to_string();
+    if let Some(existing) = prs
+        .iter_mut()
+        .find(|p| p.repo == repo && p.number == number)
+    {
+        // Idempotent: refresh the metadata, keep the original `created`/`state`.
+        existing.title = title;
+        existing.url = url;
+    } else {
+        prs.push(OpenPr {
+            repo,
+            number,
+            title,
+            url,
+            state: None,
+            created: now_iso(),
+        });
+    }
+    write_open_prs(&agent, &prs).await
+}
+
+/// All agents' open-PR rosters, keyed by agent name. Reads every `prs/*.json`.
+/// Missing dir / unreadable / malformed files ⇒ that agent simply has no PRs
+/// (best-effort, like the inbox/task readers). The list per agent is in stored
+/// order (oldest first).
+pub async fn list_open_prs() -> std::collections::BTreeMap<String, Vec<OpenPr>> {
+    let mut out: std::collections::BTreeMap<String, Vec<OpenPr>> =
+        std::collections::BTreeMap::new();
+    if let Ok(mut rd) = fs::read_dir(store_root().join("prs")).await {
+        while let Ok(Some(ent)) = rd.next_entry().await {
+            let p = ent.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                if let Ok(raw) = fs::read_to_string(&p).await {
+                    if let Ok(prs) = serde_json::from_str::<Vec<OpenPr>>(&raw) {
+                        out.insert(stem.to_string(), prs);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Reconcile one agent's recorded open PRs against fresh GitHub states (gathered
+/// by the sweep): update each PR's `state` and DROP any that merged/closed, since
+/// the surface shows only open PRs. `states` is keyed by `{repo, number}`; a PR
+/// the sweep couldn't resolve (not in `states`) is left as-is. Writes only if
+/// something changed; the file is removed when the agent's roster goes empty so
+/// stale entries don't linger. Idempotent + fail-soft (errors propagate to the
+/// caller, which logs and moves on).
+pub async fn reconcile_open_prs(agent: &str, states: &[(String, u64, String)]) -> Result<()> {
+    let agent = sanitize(agent);
+    let mut prs = read_open_prs(&agent).await;
+    if prs.is_empty() {
+        return Ok(());
+    }
+    let before = prs.len();
+    // Apply freshly-observed states; an unobserved PR keeps its cached state.
+    for pr in &mut prs {
+        if let Some((_, _, fresh)) = states
+            .iter()
+            .find(|(repo, number, _)| repo == &pr.repo && *number == pr.number)
+        {
+            pr.state = Some(fresh.clone());
+        }
+    }
+    // Drop the terminal ones — the surface is open PRs only.
+    prs.retain(|p| !matches!(p.state.as_deref(), Some("merged") | Some("closed")));
+    if prs.len() == before {
+        // No drops; only persist if a state string actually changed.
+        let on_disk = read_open_prs(&agent).await;
+        if on_disk == prs {
+            return Ok(());
+        }
+    }
+    if prs.is_empty() {
+        // Roster emptied — remove the file rather than leaving an empty array.
+        let _ = fs::remove_file(open_prs_path(&agent)).await;
+        return Ok(());
+    }
+    write_open_prs(&agent, &prs).await
+}
+
 /// List all registered agents with current presence + unread count.
 pub async fn list_agents() -> Result<Vec<AgentSummary>> {
     let agents_dir = store_root().join("agents");
@@ -1499,6 +1672,25 @@ pub async fn snapshot() -> crate::wire::SnapshotDto {
         .map(shared_task_dto)
         .collect();
 
+    // Per-agent open PRs (recorded at creation by `open_pr`), keyed by agent.
+    let agent_prs: std::collections::BTreeMap<String, Vec<crate::wire::OpenPrDto>> =
+        list_open_prs()
+            .await
+            .into_iter()
+            .map(|(name, prs)| {
+                let dtos = prs
+                    .into_iter()
+                    .map(|p| crate::wire::OpenPrDto {
+                        repo: p.repo,
+                        number: p.number,
+                        title: p.title,
+                        state: p.state,
+                    })
+                    .collect();
+                (name, dtos)
+            })
+            .collect();
+
     // Per-agent context% + the freshest account rate-limit usage.
     let mut usage: Option<(i64, UsageDto)> = None;
     let mut agents: Vec<AgentDto> = Vec::with_capacity(summaries.len());
@@ -1566,6 +1758,7 @@ pub async fn snapshot() -> crate::wire::SnapshotDto {
         inboxes,
         tasks,
         shared_tasks,
+        agent_prs,
         projects: read_projects(&root).await,
         usage: usage.map(|(_, u)| u),
     }
@@ -2385,6 +2578,199 @@ mod tests {
                 .as_deref(),
             Some("merged")
         );
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Point HOME (and clear the root overrides) at a fresh temp dir for a test
+    /// that exercises the disk-backed open-PR store. Caller holds TEST_ENV_LOCK.
+    #[cfg(test)]
+    fn isolate_home(tag: &str) -> std::path::PathBuf {
+        let home = std::env::temp_dir().join(format!("fleet-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: TEST_ENV_LOCK serializes the HOME-mutating tests.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("LAKITU_FLEET_ROOT");
+            std::env::remove_var("GENBOT_ROOT");
+        }
+        home
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // _env guard intentionally held across .await
+    async fn record_open_pr_appends_and_dedupes() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = isolate_home("open-pr-record");
+
+        // First record → appended.
+        record_open_pr("aria", "acme/web", 42, "Fix the thing", "https://x/pull/42")
+            .await
+            .unwrap();
+        let prs = read_open_prs("aria").await;
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].repo, "acme/web");
+        assert_eq!(prs[0].number, 42);
+        assert_eq!(prs[0].title, "Fix the thing");
+        assert_eq!(
+            prs[0].state, None,
+            "state starts unset (reconcile fills it)"
+        );
+        let created = prs[0].created.clone();
+
+        // A different PR → appended alongside.
+        record_open_pr("aria", "acme/web", 43, "Another", "https://x/pull/43")
+            .await
+            .unwrap();
+        assert_eq!(read_open_prs("aria").await.len(), 2);
+
+        // Re-recording {repo, number} 42 is idempotent: no duplicate, metadata
+        // refreshed in place, original `created` preserved.
+        record_open_pr(
+            "aria",
+            "acme/web",
+            42,
+            "Fix the thing (retitled)",
+            "https://x/pull/42",
+        )
+        .await
+        .unwrap();
+        let prs = read_open_prs("aria").await;
+        assert_eq!(prs.len(), 2, "idempotent on {{repo, number}} — no dup");
+        let p42 = prs.iter().find(|p| p.number == 42).unwrap();
+        assert_eq!(p42.title, "Fix the thing (retitled)", "metadata refreshed");
+        assert_eq!(p42.created, created, "original created timestamp kept");
+
+        // A malformed repo is rejected (so a bad slug never lands).
+        assert!(
+            record_open_pr("aria", "not-a-slug", 1, "x", "u")
+                .await
+                .is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn list_open_prs_keys_by_agent() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = isolate_home("open-pr-list");
+
+        record_open_pr("aria", "acme/web", 1, "a", "https://x/pull/1")
+            .await
+            .unwrap();
+        record_open_pr("aria", "acme/web", 2, "b", "https://x/pull/2")
+            .await
+            .unwrap();
+        record_open_pr("bolt", "acme/api", 9, "c", "https://x/pull/9")
+            .await
+            .unwrap();
+
+        let all = list_open_prs().await;
+        assert_eq!(all.len(), 2, "two agents have PRs");
+        assert_eq!(all["aria"].len(), 2);
+        assert_eq!(all["bolt"].len(), 1);
+        assert_eq!(all["bolt"][0].number, 9);
+        // An agent with no roster file simply isn't a key.
+        assert!(!all.contains_key("nobody"));
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn reconcile_open_prs_updates_state_and_drops_terminal() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = isolate_home("open-pr-reconcile");
+
+        record_open_pr("aria", "acme/web", 1, "open one", "https://x/pull/1")
+            .await
+            .unwrap();
+        record_open_pr("aria", "acme/web", 2, "draft one", "https://x/pull/2")
+            .await
+            .unwrap();
+        record_open_pr("aria", "acme/web", 3, "merged one", "https://x/pull/3")
+            .await
+            .unwrap();
+        record_open_pr("aria", "acme/web", 4, "closed one", "https://x/pull/4")
+            .await
+            .unwrap();
+
+        // Reconcile: #1 stays open, #2 → draft, #3 merged + #4 closed → dropped.
+        reconcile_open_prs(
+            "aria",
+            &[
+                ("acme/web".to_string(), 1, "open".to_string()),
+                ("acme/web".to_string(), 2, "draft".to_string()),
+                ("acme/web".to_string(), 3, "merged".to_string()),
+                ("acme/web".to_string(), 4, "closed".to_string()),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let prs = read_open_prs("aria").await;
+        assert_eq!(
+            prs.len(),
+            2,
+            "merged + closed dropped — roster is open only"
+        );
+        let p1 = prs.iter().find(|p| p.number == 1).unwrap();
+        let p2 = prs.iter().find(|p| p.number == 2).unwrap();
+        assert_eq!(p1.state.as_deref(), Some("open"));
+        assert_eq!(p2.state.as_deref(), Some("draft"));
+
+        // A PR not in the fresh states keeps its cached state (sweep couldn't
+        // resolve it — never assume merged). Idempotent: re-running is a no-op.
+        reconcile_open_prs("aria", &[("acme/web".to_string(), 1, "open".to_string())])
+            .await
+            .unwrap();
+        assert_eq!(read_open_prs("aria").await.len(), 2);
+
+        // Reconciling everything terminal empties the roster → file removed.
+        reconcile_open_prs(
+            "aria",
+            &[
+                ("acme/web".to_string(), 1, "merged".to_string()),
+                ("acme/web".to_string(), 2, "closed".to_string()),
+            ],
+        )
+        .await
+        .unwrap();
+        assert!(read_open_prs("aria").await.is_empty());
+        assert!(
+            !tokio::fs::try_exists(open_prs_path("aria")).await.unwrap(),
+            "emptied roster removes the file"
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn snapshot_includes_agent_prs() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = isolate_home("open-pr-snapshot");
+
+        record_open_pr("aria", "acme/web", 12, "wrapped-gh P1", "https://x/pull/12")
+            .await
+            .unwrap();
+        reconcile_open_prs("aria", &[("acme/web".to_string(), 12, "open".to_string())])
+            .await
+            .unwrap();
+
+        let snap = snapshot().await;
+        let prs = snap
+            .agent_prs
+            .get("aria")
+            .expect("aria's open PRs appear in the snapshot");
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].repo, "acme/web");
+        assert_eq!(prs[0].number, 12);
+        assert_eq!(prs[0].title, "wrapped-gh P1");
+        assert_eq!(prs[0].state.as_deref(), Some("open"));
 
         let _ = std::fs::remove_dir_all(&home);
     }

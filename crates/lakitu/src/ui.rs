@@ -582,8 +582,24 @@ fn group_content_rows(
         }
         _ => 0,
     };
+    // The agent's compact open-PRs row (single line) — shown whenever it has
+    // recorded open PRs, including when folded (visibility-critical status,
+    // like the agent's current task), so a raw `gh`-bypassing teammate's PRs
+    // can't hide behind a collapsed card.
+    let open_prs = match g.client {
+        Some(i)
+            if app
+                .open_prs
+                .get(&app.roster[i].name)
+                .map(|p| !p.is_empty())
+                .unwrap_or(false) =>
+        {
+            1
+        }
+        _ => 0,
+    };
     if app.collapsed.contains(&g.key) {
-        return status; // folded: items + tasks hidden, status still shows
+        return status + open_prs; // folded: items + tasks hidden, status + open PRs still show
     }
     // Work-items not adopted by any rendered task — adopted ones move under
     // their task, so they don't also stand alone here.
@@ -607,7 +623,7 @@ fn group_content_rows(
         }
         _ => (0, 0),
     };
-    status + items + tasks + children
+    status + open_prs + items + tasks + children
 }
 
 fn section_height(
@@ -882,6 +898,15 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
         };
         let stale = group.client.map(|i| app.roster[i].stale).unwrap_or(false);
 
+        // The agent's open PRs (recorded at creation by `open_pr`), owned up
+        // front so we don't hold a borrow on `app` across the item loop. Shown
+        // even when folded — these match what `group_content_rows` counted.
+        let open_prs: Vec<crate::store::OpenPr> = group
+            .client
+            .and_then(|i| app.open_prs.get(&app.roster[i].name))
+            .map(|p| p.to_vec())
+            .unwrap_or_default();
+
         // Open tasks for this client (hidden when folded, like work-items).
         // Owned up front so we don't hold a borrow on `app` across the loop.
         let open_tasks: Vec<crate::store::Task> = match group.client {
@@ -949,6 +974,31 @@ fn render_agents_pane(frame: &mut Frame, area: Rect, app: &mut App) {
                 },
                 &mut cbuf,
             );
+            off += 1;
+        }
+
+        // 1b. Open-PRs row — compact `open PRs: #N #M`, shown whenever the agent
+        // has recorded open PRs (incl. folded). A non-selectable info row; the
+        // #N tokens are clickable links to each PR.
+        if !open_prs.is_empty() && off < box_inner.height {
+            let py = box_inner.y + off;
+            let (line, refs) = build_open_prs_line(&open_prs, box_inner.width);
+            let mut style = Style::default();
+            if stale {
+                style = style.add_modifier(Modifier::DIM);
+            }
+            Paragraph::new(line).style(style).render(
+                Rect {
+                    x: box_inner.x,
+                    y: py,
+                    width: box_inner.width,
+                    height: 1,
+                },
+                &mut cbuf,
+            );
+            for (col_start, col_end, url) in refs {
+                click_local.push((py, box_inner.x + col_start, box_inner.x + col_end, url));
+            }
             off += 1;
         }
 
@@ -1872,6 +1922,82 @@ fn build_work_item_line<'a>(
     // through step 4 only because the title truncation depends on
     // remaining width. The unused `col` after that is intentional.
     let _ = col;
+    (Line::from(spans), targets)
+}
+
+/// Color for an open-PR status pill: open → green, draft → yellow,
+/// merged/closed → muted (those are normally dropped from the roster, so this
+/// is just defensive). `None` (state not yet observed) → muted too.
+fn pr_state_color(state: Option<&str>) -> Color {
+    match state {
+        Some("open") => Color::Green,
+        Some("draft") => Color::Yellow,
+        _ => SECONDARY_FG,
+    }
+}
+
+/// Build the agent's compact open-PRs row: `open PRs: #12 #14·draft #22`. Each
+/// `#N` is a clickable link to the PR; a non-open state is appended as a small
+/// `·state` pill. Clipped to one line (`max_width`) so the box height is always
+/// exactly 1 — a long roster truncates with `…` rather than wrapping. Returns
+/// the line plus click targets (col_start, col_end, url), col-relative to the
+/// row's left edge. `prs` must be non-empty (callers gate on that).
+fn build_open_prs_line(
+    prs: &[crate::store::OpenPr],
+    max_width: u16,
+) -> (Line<'static>, Vec<(u16, u16, String)>) {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut targets: Vec<(u16, u16, String)> = Vec::new();
+    let mut col: u16 = 0;
+    let max = max_width.max(1);
+
+    let label = "open PRs: ";
+    spans.push(Span::styled(
+        label.to_string(),
+        Style::default().fg(SECONDARY_FG),
+    ));
+    col += label.chars().count() as u16;
+
+    for (i, pr) in prs.iter().enumerate() {
+        // Stop cleanly if we're out of room, marking the overflow with an
+        // ellipsis (mirrors `clip`'s behavior at the row level).
+        let pill = match pr.state.as_deref() {
+            Some(s) if s != "open" => format!("·{s}"),
+            _ => String::new(),
+        };
+        let sep = if i == 0 { "" } else { " " };
+        let token = format!("{sep}#{}", pr.number);
+        let token_w = token.chars().count() as u16;
+        let pill_w = pill.chars().count() as u16;
+        if col + token_w + pill_w >= max {
+            spans.push(Span::styled(
+                "…".to_string(),
+                Style::default().fg(SECONDARY_FG),
+            ));
+            break;
+        }
+        if !sep.is_empty() {
+            spans.push(Span::raw(sep.to_string()));
+            col += sep.chars().count() as u16;
+        }
+        let ref_text = format!("#{}", pr.number);
+        let ref_w = ref_text.chars().count() as u16;
+        let start = col;
+        spans.push(Span::styled(ref_text, normal_ref_style()));
+        targets.push((
+            start,
+            start + ref_w,
+            crate::event::RefKind::Pr.url(&pr.repo, pr.number),
+        ));
+        col += ref_w;
+        if !pill.is_empty() {
+            spans.push(Span::styled(
+                pill,
+                Style::default().fg(pr_state_color(pr.state.as_deref())),
+            ));
+            col += pill_w;
+        }
+    }
     (Line::from(spans), targets)
 }
 

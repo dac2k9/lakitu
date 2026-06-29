@@ -633,12 +633,23 @@ impl AgentBoardService {
                     .map(|r| (normalize_repo_slug(Some(r.repo.as_str())), r.number))
             })
             .collect();
+        // PRs recorded in the open-PR store (via `open_pr`), keyed by
+        // {normalized repo, number}. Used to (a) flag a live-open PR that
+        // bypassed `open_pr` as "untracked", and (b) reconcile recorded PRs
+        // against GitHub below (refresh state, drop merged/closed).
+        let recorded_prs = fleet::list_open_prs().await;
+        let recorded_keys: std::collections::HashSet<(String, u64)> = recorded_prs
+            .values()
+            .flatten()
+            .map(|p| (normalize_repo_slug(Some(p.repo.as_str())), p.number))
+            .collect();
 
         let multi = repos.len() > 1;
         let mut out = String::new();
         let mut emitted = 0usize;
         let mut reconciled = 0usize;
         let mut unlinked = 0usize;
+        let mut untracked = 0usize;
         for repo_slug in &repos {
             if multi {
                 out.push_str(&format!("== {repo_slug} ==\n"));
@@ -661,6 +672,15 @@ impl AgentBoardService {
                 if !linked_to_task.contains(&(repo_slug.clone(), *number)) {
                     out.push_str("  ⚠ no shared-task link");
                     unlinked += 1;
+                }
+                // Backstop: a live-open PR not in the open-PR store bypassed
+                // `open_pr` (raw `gh pr create`) — flag it so the supervisor
+                // knows the paved path was skipped. (The shared-task back-fill
+                // above still surfaces it as a work item; this is the
+                // record-at-creation gap.)
+                if !recorded_keys.contains(&(repo_slug.clone(), *number)) {
+                    out.push_str("  ⚠ untracked (opened outside open_pr)");
+                    untracked += 1;
                 }
                 out.push('\n');
                 // Back-fill: register PRs the cockpit hasn't logged yet so
@@ -736,6 +756,42 @@ impl AgentBoardService {
                 }
             }
         }
+
+        // Reconcile the open-PR store: for each agent's recorded PRs, re-query
+        // the GitHub state and drop the ones that merged/closed (the roster
+        // shows only open PRs). Idempotent + fail-soft — a gh/JSON error on one
+        // ref yields `None` and leaves that PR's cached state untouched. Runs
+        // across ALL recorded PRs, not just the swept repos, so a PR in an
+        // un-swept repo still gets reconciled out once it lands.
+        let mut dropped = 0usize;
+        for (agent, prs) in &recorded_prs {
+            if prs.is_empty() {
+                continue;
+            }
+            let mut states: Vec<(String, u64, String)> = Vec::with_capacity(prs.len());
+            for pr in prs {
+                let slug = normalize_repo_slug(Some(pr.repo.as_str()));
+                if let Some(state) = ref_state(fleet::RefKind::Pr, &slug, pr.number).await {
+                    states.push((pr.repo.clone(), pr.number, state));
+                }
+            }
+            let terminal = states
+                .iter()
+                .filter(|(_, _, s)| matches!(s.as_str(), "merged" | "closed"))
+                .count();
+            if let Err(e) = fleet::reconcile_open_prs(agent, &states).await {
+                tracing::warn!(error = %e, agent, "sweep: failed to reconcile open-PR store");
+            } else {
+                dropped += terminal;
+            }
+        }
+        if dropped > 0 {
+            out.push_str(&format!(
+                "({dropped} recorded PR{} reconciled out of the open-PR roster)\n",
+                if dropped == 1 { "" } else { "s" }
+            ));
+        }
+
         if emitted > 0 {
             out.push_str(&format!(
                 "\n({emitted} new PR{} surfaced to the cockpit)\n",
@@ -751,6 +807,11 @@ impl AgentBoardService {
         if unlinked > 0 {
             out.push_str(&format!(
                 "\n⚠ {unlinked} open PR(s) not linked to a shared task — add \"Fixes #<issue>\" (the reconcile auto-links those) or call link_shared_task(id, pr).\n"
+            ));
+        }
+        if untracked > 0 {
+            out.push_str(&format!(
+                "\n⚠ {untracked} open PR(s) opened outside open_pr (raw gh) — use open_pr next time so the PR is recorded at creation and visible in the cockpit.\n"
             ));
         }
         Ok(text(out))
@@ -926,6 +987,189 @@ impl AgentBoardService {
             "Filed #{} (from PR #{}): {}",
             issue_number, req.parent_pr, url
         )))
+    }
+
+    #[tool(
+        name = "open_pr",
+        description = "Open a GitHub PR AND record it in the fleet store in one shot, so it shows \
+        in the cockpit by construction — no manual linking. Use this instead of raw `gh pr create`: \
+        a raw-gh PR is invisible to the supervisor. Runs `gh pr create` (with --base/--head/--draft \
+        when given; `fixes_issue` appends `Fixes #N` to the body so GitHub auto-closes the issue on \
+        merge), then records the PR under your `name` in the open-PR roster, emits a `pr-opened` \
+        event, and links it to `shared_task` if given. The GitHub action happens FIRST; recording is \
+        best-effort, so a created PR is never lost even if the store write fails. Returns the new PR \
+        number + URL. (P4 account selection is out of scope — uses the current gh account.)"
+    )]
+    async fn open_pr(
+        &self,
+        Parameters(req): Parameters<OpenPrRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        // Default the target repo to the caller's registered repo when omitted,
+        // else the configured default. Then normalize to the `owner/name` slug
+        // gh wants.
+        let repo_hint = match req.repo.clone() {
+            Some(r) => Some(r),
+            None => fleet::agent_repo(&req.name).await,
+        };
+        let repo_slug = normalize_repo_slug(repo_hint.as_deref());
+        let repo_name = normalize_repo_name(repo_hint.as_deref());
+
+        // `fixes_issue` → append the GitHub auto-close keyword to the body, the
+        // same convention the loop's PR template uses.
+        let body = match req.fixes_issue {
+            Some(n) => format!("{}\n\nFixes #{}", req.body, n),
+            None => req.body.clone(),
+        };
+
+        // 1. Create the PR (the GitHub action — FIRST). `gh pr create` prints
+        // the PR URL on stdout on success (after any branch-tracking preamble).
+        let mut args: Vec<&str> = vec![
+            "pr", "create", "--repo", &repo_slug, "--title", &req.title, "--body", &body,
+        ];
+        if let Some(base) = req.base.as_deref() {
+            args.extend_from_slice(&["--base", base]);
+        }
+        if let Some(head) = req.head.as_deref() {
+            args.extend_from_slice(&["--head", head]);
+        }
+        if req.draft {
+            args.push("--draft");
+        }
+        let stdout = run_gh(&args).await?;
+        let (number, url) = parse_created_url(&stdout)?;
+
+        // 2. Record / emit / link — all FAIL-SOFT. The PR exists now; a store
+        // error must never lose it or block the return. We collect any soft
+        // failures into the response so the agent sees them but still gets the
+        // {number, url}.
+        let mut warnings: Vec<String> = Vec::new();
+
+        if let Err(e) = fleet::record_open_pr(&req.name, &repo_slug, number, &req.title, &url).await
+        {
+            tracing::warn!(error = %e, repo = %repo_slug, number, "open_pr: failed to record PR (PR was created)");
+            warnings.push(format!("record failed: {e}"));
+        }
+
+        let mut d = HashMap::new();
+        d.insert("pr".to_string(), format!("#{number}"));
+        if let Err(e) =
+            append_audit_log("open-pr", "pr-opened", &repo_name, &format_details(&d)).await
+        {
+            tracing::warn!(error = %e, "open_pr: failed to emit pr-opened event");
+            warnings.push(format!("event-log failed: {e}"));
+        }
+
+        if let Some(id) = req.shared_task.as_deref() {
+            if let Err(e) =
+                fleet::link_shared_task(id, fleet::RefKind::Pr, &repo_slug, number).await
+            {
+                tracing::warn!(error = %e, task = id, "open_pr: failed to link shared task");
+                warnings.push(format!("shared-task link failed: {e}"));
+            }
+        }
+
+        let mut msg = format!("Opened PR #{number}: {url}");
+        if !warnings.is_empty() {
+            // PR is created — surface the soft failures without erroring.
+            msg.push_str(&format!(
+                "\n(recorded with warnings: {})",
+                warnings.join("; ")
+            ));
+        }
+        Ok(text(msg))
+    }
+
+    #[tool(
+        name = "file_issue",
+        description = "Open a GitHub issue AND record it in the fleet store in one shot. The general \
+        form of `file_followup_issue` (no required parent-PR ref). Use this instead of raw `gh issue \
+        create`. Runs `gh issue create` (with comma-separated --label when given), adds the issue to \
+        the repo's board (auto-discovered), emits an `issue-filed` event, and links it to \
+        `shared_task` if given. The GitHub action happens FIRST; recording is best-effort, so a \
+        created issue is never lost. Returns the new issue number + URL."
+    )]
+    async fn file_issue(
+        &self,
+        Parameters(req): Parameters<FileIssueRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        // Default the repo to the caller's registered repo when omitted.
+        let repo_hint = match req.repo.clone() {
+            Some(r) => Some(r),
+            None => fleet::agent_repo(&req.name).await,
+        };
+        let repo_slug = normalize_repo_slug(repo_hint.as_deref());
+        let repo_name = normalize_repo_name(repo_hint.as_deref());
+
+        // 1. Create the issue (the GitHub action — FIRST). `gh issue create`
+        // prints the URL on stdout on success.
+        let mut args: Vec<&str> = vec![
+            "issue", "create", "--repo", &repo_slug, "--title", &req.title, "--body", &req.body,
+        ];
+        let labels = req
+            .labels
+            .as_deref()
+            .map(str::trim)
+            .filter(|l| !l.is_empty());
+        if let Some(l) = labels {
+            args.extend_from_slice(&["--label", l]);
+        }
+        let stdout = run_gh(&args).await?;
+        let (number, url) = parse_created_url(&stdout)?;
+
+        // 2. Record-side — all FAIL-SOFT (the issue exists now).
+        let mut warnings: Vec<String> = Vec::new();
+
+        // Add to the repo's board (auto-discovered). Best-effort: a board lookup
+        // or item-add failure must not lose the filed issue.
+        match self.board_for(&repo_slug).await {
+            Ok((coords, _)) => {
+                if let Err(e) = run_gh(&[
+                    "project",
+                    "item-add",
+                    &coords.number.to_string(),
+                    "--owner",
+                    &coords.owner,
+                    "--url",
+                    &url,
+                ])
+                .await
+                {
+                    tracing::warn!(error = %e, "file_issue: failed to add issue to board");
+                    warnings.push(format!("board-add failed: {e}"));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "file_issue: failed to resolve board");
+                warnings.push(format!("board lookup failed: {e}"));
+            }
+        }
+
+        let mut d = HashMap::new();
+        d.insert("issue".to_string(), format!("#{number}"));
+        if let Err(e) =
+            append_audit_log("file-issue", "issue-filed", &repo_name, &format_details(&d)).await
+        {
+            tracing::warn!(error = %e, "file_issue: failed to emit issue-filed event");
+            warnings.push(format!("event-log failed: {e}"));
+        }
+
+        if let Some(id) = req.shared_task.as_deref() {
+            if let Err(e) =
+                fleet::link_shared_task(id, fleet::RefKind::Issue, &repo_slug, number).await
+            {
+                tracing::warn!(error = %e, task = id, "file_issue: failed to link shared task");
+                warnings.push(format!("shared-task link failed: {e}"));
+            }
+        }
+
+        let mut msg = format!("Filed issue #{number}: {url}");
+        if !warnings.is_empty() {
+            msg.push_str(&format!(
+                "\n(recorded with warnings: {})",
+                warnings.join("; ")
+            ));
+        }
+        Ok(text(msg))
     }
 
     #[tool(
@@ -2023,6 +2267,75 @@ pub struct FileFollowupIssueRequest {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct OpenPrRequest {
+    #[schemars(
+        description = "Your own agent name (the opening agent) — credited as the PR's owner in the cockpit's open-PR roster, so the supervisor can see/steer/merge it."
+    )]
+    pub name: String,
+    #[schemars(
+        description = "Optional repo to open the PR in. Bare name or 'owner/repo'. Defaults to YOUR registered repo (from the registry), else the configured default."
+    )]
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[schemars(description = "PR title — short imperative summary.")]
+    pub title: String,
+    #[schemars(
+        description = "PR body (markdown). The skill convention is to end with the `🤖 Generated with [Claude Code]` footer so the sweep recognizes it as agent-authored."
+    )]
+    pub body: String,
+    #[schemars(
+        description = "Optional base branch to merge into (gh's --base). Omit to use the repo default branch."
+    )]
+    #[serde(default)]
+    pub base: Option<String>,
+    #[schemars(
+        description = "Optional head branch the PR is opened from (gh's --head). Omit to use the current branch."
+    )]
+    #[serde(default)]
+    pub head: Option<String>,
+    #[schemars(description = "Open as a draft PR (gh's --draft). Defaults to false.")]
+    #[serde(default)]
+    pub draft: bool,
+    #[schemars(
+        description = "Optional shared-task id to link this PR to (so it shows under that shared goal). Omit and the PR stands as your own open PR."
+    )]
+    #[serde(default)]
+    pub shared_task: Option<String>,
+    #[schemars(
+        description = "Optional issue number this PR closes. Appends 'Fixes #N' to the body so GitHub links + auto-closes the issue on merge."
+    )]
+    #[serde(default)]
+    pub fixes_issue: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FileIssueRequest {
+    #[schemars(
+        description = "Your own agent name (the filing agent) — recorded in the audit log as who filed it."
+    )]
+    pub name: String,
+    #[schemars(
+        description = "Optional repo to file the issue in. Bare name or 'owner/repo'. Defaults to YOUR registered repo (from the registry), else the configured default. The issue lands on that repo's board (its linked Project v2)."
+    )]
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[schemars(description = "Issue title — short imperative summary.")]
+    pub title: String,
+    #[schemars(description = "Issue body (markdown), taken as-is.")]
+    pub body: String,
+    #[schemars(
+        description = "Optional comma-separated labels to apply (gh's --label), e.g. 'bug,p2'. Each must already exist on the repo."
+    )]
+    #[serde(default)]
+    pub labels: Option<String>,
+    #[schemars(
+        description = "Optional shared-task id to link this issue to (so it shows under that shared goal)."
+    )]
+    #[serde(default)]
+    pub shared_task: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RegisterAgentRequest {
     #[schemars(
         description = "Stable agent handle, kebab-case (e.g. 'vscode-bot'). Becomes the file/inbox name; non-path-safe characters are replaced with '-'."
@@ -2372,6 +2685,43 @@ fn mcp(e: impl std::fmt::Display) -> McpError {
 
 fn text(s: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![Content::text(s.into())])
+}
+
+/// Parse the `{number, url}` of a freshly created issue/PR from `gh
+/// issue/pr create`'s stdout. On success gh prints the canonical URL — the
+/// number is its last path segment (e.g. `https://github.com/acme/web/pull/42`
+/// → 42). gh sometimes emits extra preamble lines (e.g. branch-tracking notices
+/// from `pr create`), so we take the LAST non-empty line that looks like a
+/// github URL with a trailing number — the created object's URL — rather than
+/// blindly trusting the final line. Pure (no IO) so it's unit-testable.
+fn parse_created_url(stdout: &str) -> Result<(u64, String), McpError> {
+    let candidate = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        // Last line whose final path segment parses as a number — the created
+        // issue/PR URL. `rev()` so a trailing URL wins over any preamble.
+        .rev()
+        .find(|l| {
+            l.contains("://")
+                && l.rsplit('/')
+                    .next()
+                    .map(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+                    .unwrap_or(false)
+        });
+    match candidate {
+        Some(url) => {
+            let number = url
+                .rsplit('/')
+                .next()
+                .and_then(|s| s.parse::<u64>().ok())
+                .ok_or_else(|| mcp(format!("could not parse number from `gh` output: {url:?}")))?;
+            Ok((number, url.to_string()))
+        }
+        None => Err(mcp(format!(
+            "could not find a created issue/PR URL in `gh` output: {stdout:?}"
+        ))),
+    }
 }
 
 async fn run_gh(args: &[&str]) -> Result<String, McpError> {
@@ -3008,6 +3358,43 @@ mod tests {
         assert_eq!(parse_pr_ref("issue=#90 reason=release-gate"), None);
         assert_eq!(parse_pr_ref("note=lakitu-mcp wired in"), None);
         assert_eq!(parse_pr_ref(""), None);
+    }
+
+    #[test]
+    fn parse_created_url_extracts_number_and_url() {
+        // Plain `gh pr/issue create` output: just the URL on stdout.
+        let (n, url) = parse_created_url("https://github.com/acme/web/pull/42\n").unwrap();
+        assert_eq!(n, 42);
+        assert_eq!(url, "https://github.com/acme/web/pull/42");
+
+        // Issue URL.
+        let (n, url) = parse_created_url("https://github.com/acme/api/issues/7\n").unwrap();
+        assert_eq!(n, 7);
+        assert_eq!(url, "https://github.com/acme/api/issues/7");
+    }
+
+    #[test]
+    fn parse_created_url_ignores_preamble_lines() {
+        // `gh pr create` can print branch-tracking notices BEFORE the URL; the
+        // created object's URL is the last URL-with-trailing-number line.
+        let stdout = "\
+Warning: 3 uncommitted changes
+branch 'feat/x' set up to track 'origin/feat/x'.
+https://github.com/acme/web/pull/123
+";
+        let (n, url) = parse_created_url(stdout).unwrap();
+        assert_eq!(n, 123);
+        assert_eq!(url, "https://github.com/acme/web/pull/123");
+    }
+
+    #[test]
+    fn parse_created_url_rejects_unparseable() {
+        // No URL with a trailing number → an error (so a created PR is never
+        // silently mis-recorded with a bogus number).
+        assert!(parse_created_url("").is_err());
+        assert!(parse_created_url("aborting: could not create PR\n").is_err());
+        // A repo URL without a numeric tail isn't a created-object URL.
+        assert!(parse_created_url("https://github.com/acme/web\n").is_err());
     }
 
     #[test]
