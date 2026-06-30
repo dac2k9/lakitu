@@ -8,6 +8,7 @@
 //! Phase 2 mounts a `/v1` REST API (for the hooks + the remote cockpit) onto
 //! this same router, under this same auth layer.
 
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,6 +20,7 @@ use axum::{
     middleware::{self, Next},
     response::Response,
 };
+use futures::FutureExt;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
@@ -117,13 +119,27 @@ pub async fn serve() -> Result<()> {
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
-                        let report = crate::server::reconcile_shared_tasks(None).await;
-                        if report.advanced > 0 || report.notified > 0 {
-                            tracing::info!(
-                                advanced = report.advanced,
-                                notified = report.notified,
-                                "reconcile loop: shared tasks updated from GitHub"
-                            );
+                        // The sweep is fail-soft (no unwraps on gh data), but this
+                        // task is unmonitored — if a future change ever panicked
+                        // mid-pass it would die silently and reconciles would just
+                        // stop. catch_unwind logs the panic and keeps the loop ticking.
+                        match AssertUnwindSafe(crate::server::reconcile_shared_tasks(None))
+                            .catch_unwind()
+                            .await
+                        {
+                            Ok(report) => {
+                                if report.advanced > 0 || report.notified > 0 {
+                                    tracing::info!(
+                                        advanced = report.advanced,
+                                        notified = report.notified,
+                                        "reconcile loop: shared tasks updated from GitHub"
+                                    );
+                                }
+                            }
+                            Err(_) => tracing::error!(
+                                "reconcile loop: a reconcile pass panicked — continuing; \
+                                 unexpected (the sweep is fail-soft), please investigate"
+                            ),
                         }
                     }
                     _ = reconcile_ct.cancelled() => break,
