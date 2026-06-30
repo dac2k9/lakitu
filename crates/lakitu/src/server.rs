@@ -1942,159 +1942,181 @@ impl AgentBoardService {
         Parameters(req): Parameters<SweepSharedTasksRequest>,
     ) -> Result<CallToolResult, McpError> {
         let want = req.id.as_deref().map(fleet::sanitize);
-        let tasks = fleet::list_shared_tasks().await;
-        let mut out = String::new();
-        let mut advanced = 0usize;
-        let mut notified = 0usize;
-        for t in &tasks {
-            if want.as_ref().is_some_and(|w| &t.id != w) {
-                continue;
+        Ok(text(reconcile_shared_tasks(want).await.out))
+    }
+}
+
+/// Counts + rendered text from one shared-task reconcile pass.
+pub(crate) struct ReconcileReport {
+    /// Per-task lines + the summary line — the `sweep_shared_tasks` tool output.
+    pub out: String,
+    /// Tasks whose state advanced this pass.
+    pub advanced: usize,
+    /// Merge-notifications sent this pass.
+    pub notified: usize,
+}
+
+/// Reconcile every shared task (or just `want`, if given) against real GitHub
+/// PR state — the shared core behind the `sweep_shared_tasks` MCP tool and the
+/// daemon's periodic reconcile loop. Best-effort and idempotent: per-task
+/// gh/store errors are swallowed so one bad task can't abort the pass. Moves
+/// are stamped `by = "reconcile"`; a one-shot merge notification fires per
+/// newly-merged PR. `want` is an already-sanitized task id.
+pub(crate) async fn reconcile_shared_tasks(want: Option<String>) -> ReconcileReport {
+    let tasks = fleet::list_shared_tasks().await;
+    let mut out = String::new();
+    let mut advanced = 0usize;
+    let mut notified = 0usize;
+    for t in &tasks {
+        if want.as_ref().is_some_and(|w| &t.id != w) {
+            continue;
+        }
+        if t.archived {
+            continue; // archived = put away; not reconciled
+        }
+        // Links we already have; discover more from each linked issue.
+        let mut linked: std::collections::HashSet<(String, u64)> =
+            t.prs.iter().map(|r| (r.repo.clone(), r.number)).collect();
+        // PRs allowed to drive the state advance: pre-existing/manual links +
+        // closers (the authoritative "does the work" set). Auto-discovered
+        // reference-only PRs LINK (for visibility) but must not move task
+        // state — a referencer is any PR that *mentions* the issue, not one
+        // that does its work, so a tangential merged mention shouldn't advance
+        // the goal.
+        let mut advance_prs: std::collections::HashSet<(String, u64)> =
+            t.prs.iter().map(|r| (r.repo.clone(), r.number)).collect();
+        let mut joined: std::collections::HashSet<String> =
+            t.participants.iter().cloned().collect();
+        let mut new_links = 0usize;
+        let mut new_parts = 0usize;
+        for issue in &t.issues {
+            if issue.repo.split_once('/').is_none() {
+                continue; // malformed ref — skip so one bad ref can't abort the pass
             }
-            if t.archived {
-                continue; // archived = put away; not reconciled
-            }
-            // Links we already have; discover more from each linked issue.
-            let mut linked: std::collections::HashSet<(String, u64)> =
-                t.prs.iter().map(|r| (r.repo.clone(), r.number)).collect();
-            // PRs allowed to drive the state advance: pre-existing/manual links +
-            // closers (the authoritative "does the work" set). Auto-discovered
-            // reference-only PRs LINK (for visibility) but must not move task
-            // state — a referencer is any PR that *mentions* the issue, not one
-            // that does its work, so a tangential merged mention shouldn't advance
-            // the goal.
-            let mut advance_prs: std::collections::HashSet<(String, u64)> =
-                t.prs.iter().map(|r| (r.repo.clone(), r.number)).collect();
-            let mut joined: std::collections::HashSet<String> =
-                t.participants.iter().cloned().collect();
-            let mut new_links = 0usize;
-            let mut new_parts = 0usize;
-            for issue in &t.issues {
-                if issue.repo.split_once('/').is_none() {
-                    continue; // malformed ref — skip so one bad ref can't abort the pass
-                }
-                // Closers (home-repo, Fixes #N) are authoritative — they drive
-                // state. Cross-repo PRs that only *reference* the goal-issue are
-                // discovered too (the close query misses out-of-repo contributors,
-                // since GitHub can't auto-close across repos) but link for
-                // visibility only — they're kept out of advance_prs above.
-                let closers = issue_closing_prs(&issue.repo, issue.number).await;
-                let referencers = issue_referencing_prs(&issue.repo, issue.number).await;
-                advance_prs.extend(closers.iter().map(|(r, n, _)| (r.clone(), *n)));
-                for (pr_repo, pr, author) in closers.into_iter().chain(referencers) {
-                    let key = (pr_repo.clone(), pr);
-                    if !linked.contains(&key)
-                        && fleet::link_shared_task(&t.id, fleet::RefKind::Pr, &pr_repo, pr)
-                            .await
-                            .is_ok()
-                    {
-                        linked.insert(key);
-                        new_links += 1;
-                    }
-                    if !author.is_empty()
-                        && !joined.contains(&author)
-                        && fleet::join_shared_task(&t.id, &author).await.is_ok()
-                    {
-                        joined.insert(author.clone());
-                        new_parts += 1;
-                    }
-                }
-            }
-            // GitHub state of every linked ref — cached on the ref for the
-            // snapshot's status pills, and (for PRs) the forward-only advance
-            // signal. PRs: open|draft|merged|closed; issues: open|closed.
-            let mut states: Vec<(String, u64, String)> = Vec::new();
-            for issue in &t.issues {
-                if let Some(s) = ref_state(fleet::RefKind::Issue, &issue.repo, issue.number).await {
-                    states.push((issue.repo.clone(), issue.number, s));
-                }
-            }
-            let mut open_pr: Option<(String, u64)> = None;
-            let mut merged_pr: Option<(String, u64)> = None;
-            // PRs that crossed into "merged" *this* pass — the per-PR merge edge
-            // (prior cached state wasn't already "merged"). We notify on these.
-            let mut newly_merged: Vec<(String, u64)> = Vec::new();
-            for (repo, pr) in &linked {
-                if let Some(s) = ref_state(fleet::RefKind::Pr, repo, *pr).await {
-                    // Cache the pill for every linked PR (visibility), but only an
-                    // advance-eligible PR (closer / manual link) may move state or
-                    // fire a merge-notification — a reference-only mention must not.
-                    if advance_prs.contains(&(repo.clone(), *pr)) {
-                        let prior = t
-                            .prs
-                            .iter()
-                            .find(|r| &r.repo == repo && r.number == *pr)
-                            .and_then(|r| r.state.as_deref());
-                        if fleet::is_merge_edge(prior, &s) {
-                            newly_merged.push((repo.clone(), *pr));
-                        }
-                        match s.as_str() {
-                            "open" | "draft" if open_pr.is_none() => {
-                                open_pr = Some((repo.clone(), *pr))
-                            }
-                            "merged" if merged_pr.is_none() => {
-                                merged_pr = Some((repo.clone(), *pr))
-                            }
-                            _ => {}
-                        }
-                    }
-                    states.push((repo.clone(), *pr, s));
-                }
-            }
-            fleet::cache_ref_states(&t.id, &states).await.ok();
-            let note = match (&merged_pr, &open_pr) {
-                (Some((r, n)), _) => format!("merged {r}#{n}"),
-                (None, Some((r, n))) => format!("PR {r}#{n} open"),
-                _ => String::new(),
-            };
-            if let Ok(Some(next)) = fleet::reconcile_advance(
-                &t.id,
-                open_pr.is_some(),
-                merged_pr.is_some(),
-                Some(note.as_str()),
-            )
-            .await
-            {
-                out.push_str(&format!("  {}: -> {}  ({note})\n", t.id, next.as_str()));
-                advanced += 1;
-            }
-            // Notify the agent(s) registered for each just-merged PR's repo
-            // (repo-owner routing; fall back to the task owner if none). The
-            // cached "merged" state written above guards against re-notifying.
-            for (repo, pr) in &newly_merged {
-                let mut targets = fleet::agents_for_repo(repo).await;
-                if targets.is_empty() {
-                    targets.push(t.owner.clone());
-                }
-                let title = format!("PR merged: {repo}#{pr}");
-                let body = format!(
-                    "{repo}#{pr} is merged — it's linked to shared task {} \"{}\". \
-                     You're getting this as the agent registered for {repo}.",
-                    t.id, t.title
-                );
-                for to in &targets {
-                    if fleet::send_message("reconcile", to, &title, &body)
+            // Closers (home-repo, Fixes #N) are authoritative — they drive
+            // state. Cross-repo PRs that only *reference* the goal-issue are
+            // discovered too (the close query misses out-of-repo contributors,
+            // since GitHub can't auto-close across repos) but link for
+            // visibility only — they're kept out of advance_prs above.
+            let closers = issue_closing_prs(&issue.repo, issue.number).await;
+            let referencers = issue_referencing_prs(&issue.repo, issue.number).await;
+            advance_prs.extend(closers.iter().map(|(r, n, _)| (r.clone(), *n)));
+            for (pr_repo, pr, author) in closers.into_iter().chain(referencers) {
+                let key = (pr_repo.clone(), pr);
+                if !linked.contains(&key)
+                    && fleet::link_shared_task(&t.id, fleet::RefKind::Pr, &pr_repo, pr)
                         .await
                         .is_ok()
-                    {
-                        out.push_str(&format!("  {}: notified {to} ({repo}#{pr} merged)\n", t.id));
-                        notified += 1;
-                    }
+                {
+                    linked.insert(key);
+                    new_links += 1;
+                }
+                if !author.is_empty()
+                    && !joined.contains(&author)
+                    && fleet::join_shared_task(&t.id, &author).await.is_ok()
+                {
+                    joined.insert(author.clone());
+                    new_parts += 1;
                 }
             }
-            if new_links > 0 || new_parts > 0 {
-                out.push_str(&format!(
-                    "  {}: +{new_links} PR(s), +{new_parts} participant(s)\n",
-                    t.id
-                ));
+        }
+        // GitHub state of every linked ref — cached on the ref for the
+        // snapshot's status pills, and (for PRs) the forward-only advance
+        // signal. PRs: open|draft|merged|closed; issues: open|closed.
+        let mut states: Vec<(String, u64, String)> = Vec::new();
+        for issue in &t.issues {
+            if let Some(s) = ref_state(fleet::RefKind::Issue, &issue.repo, issue.number).await {
+                states.push((issue.repo.clone(), issue.number, s));
             }
         }
-        if out.is_empty() {
-            out.push_str("(no shared-task changes)\n");
+        let mut open_pr: Option<(String, u64)> = None;
+        let mut merged_pr: Option<(String, u64)> = None;
+        // PRs that crossed into "merged" *this* pass — the per-PR merge edge
+        // (prior cached state wasn't already "merged"). We notify on these.
+        let mut newly_merged: Vec<(String, u64)> = Vec::new();
+        for (repo, pr) in &linked {
+            if let Some(s) = ref_state(fleet::RefKind::Pr, repo, *pr).await {
+                // Cache the pill for every linked PR (visibility), but only an
+                // advance-eligible PR (closer / manual link) may move state or
+                // fire a merge-notification — a reference-only mention must not.
+                if advance_prs.contains(&(repo.clone(), *pr)) {
+                    let prior = t
+                        .prs
+                        .iter()
+                        .find(|r| &r.repo == repo && r.number == *pr)
+                        .and_then(|r| r.state.as_deref());
+                    if fleet::is_merge_edge(prior, &s) {
+                        newly_merged.push((repo.clone(), *pr));
+                    }
+                    match s.as_str() {
+                        "open" | "draft" if open_pr.is_none() => {
+                            open_pr = Some((repo.clone(), *pr))
+                        }
+                        "merged" if merged_pr.is_none() => merged_pr = Some((repo.clone(), *pr)),
+                        _ => {}
+                    }
+                }
+                states.push((repo.clone(), *pr, s));
+            }
         }
-        out.push_str(&format!(
-            "({advanced} state(s) advanced, {notified} merge-notification(s) sent)\n"
-        ));
-        Ok(text(out))
+        fleet::cache_ref_states(&t.id, &states).await.ok();
+        let note = match (&merged_pr, &open_pr) {
+            (Some((r, n)), _) => format!("merged {r}#{n}"),
+            (None, Some((r, n))) => format!("PR {r}#{n} open"),
+            _ => String::new(),
+        };
+        if let Ok(Some(next)) = fleet::reconcile_advance(
+            &t.id,
+            open_pr.is_some(),
+            merged_pr.is_some(),
+            Some(note.as_str()),
+        )
+        .await
+        {
+            out.push_str(&format!("  {}: -> {}  ({note})\n", t.id, next.as_str()));
+            advanced += 1;
+        }
+        // Notify the agent(s) registered for each just-merged PR's repo
+        // (repo-owner routing; fall back to the task owner if none). The
+        // cached "merged" state written above guards against re-notifying.
+        for (repo, pr) in &newly_merged {
+            let mut targets = fleet::agents_for_repo(repo).await;
+            if targets.is_empty() {
+                targets.push(t.owner.clone());
+            }
+            let title = format!("PR merged: {repo}#{pr}");
+            let body = format!(
+                "{repo}#{pr} is merged — it's linked to shared task {} \"{}\". \
+                     You're getting this as the agent registered for {repo}.",
+                t.id, t.title
+            );
+            for to in &targets {
+                if fleet::send_message("reconcile", to, &title, &body)
+                    .await
+                    .is_ok()
+                {
+                    out.push_str(&format!("  {}: notified {to} ({repo}#{pr} merged)\n", t.id));
+                    notified += 1;
+                }
+            }
+        }
+        if new_links > 0 || new_parts > 0 {
+            out.push_str(&format!(
+                "  {}: +{new_links} PR(s), +{new_parts} participant(s)\n",
+                t.id
+            ));
+        }
+    }
+    if out.is_empty() {
+        out.push_str("(no shared-task changes)\n");
+    }
+    out.push_str(&format!(
+        "({advanced} state(s) advanced, {notified} merge-notification(s) sent)\n"
+    ));
+    ReconcileReport {
+        out,
+        advanced,
+        notified,
     }
 }
 

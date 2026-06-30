@@ -8,6 +8,7 @@
 //! Phase 2 mounts a `/v1` REST API (for the hooks + the remote cockpit) onto
 //! this same router, under this same auth layer.
 
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,6 +20,7 @@ use axum::{
     middleware::{self, Next},
     response::Response,
 };
+use futures::FutureExt;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
@@ -96,6 +98,58 @@ pub async fn serve() -> Result<()> {
         .await
         .with_context(|| format!("binding {listen}"))?;
     tracing::info!(%listen, "lakitu-mcp daemon listening (MCP at /mcp)");
+
+    // Periodic reconcile loop. Re-derives shared-task state from real GitHub PR
+    // state on a timer, so a merged PR advances its task (open => active,
+    // merged => in-review) and fires its one-shot merge notification WITHOUT an
+    // agent having to call `sweep_shared_tasks`. Read-only `gh` + store writes,
+    // stamped `by = "reconcile"`; per-task errors are swallowed so the loop
+    // survives a flaky `gh`. Interval is LAKITU_RECONCILE_SECS (default 150 =
+    // 2.5 min); set it to 0 to disable. The child token stops it on shutdown.
+    let reconcile_secs = std::env::var("LAKITU_RECONCILE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(150);
+    if reconcile_secs > 0 {
+        let reconcile_ct = ct.child_token();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(reconcile_secs));
+            // If a pass runs long (slow gh), skip missed ticks instead of bursting.
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        // The sweep is fail-soft (no unwraps on gh data), but this
+                        // task is unmonitored — if a future change ever panicked
+                        // mid-pass it would die silently and reconciles would just
+                        // stop. catch_unwind logs the panic and keeps the loop ticking.
+                        match AssertUnwindSafe(crate::server::reconcile_shared_tasks(None))
+                            .catch_unwind()
+                            .await
+                        {
+                            Ok(report) => {
+                                if report.advanced > 0 || report.notified > 0 {
+                                    tracing::info!(
+                                        advanced = report.advanced,
+                                        notified = report.notified,
+                                        "reconcile loop: shared tasks updated from GitHub"
+                                    );
+                                }
+                            }
+                            Err(_) => tracing::error!(
+                                "reconcile loop: a reconcile pass panicked — continuing; \
+                                 unexpected (the sweep is fail-soft), please investigate"
+                            ),
+                        }
+                    }
+                    _ = reconcile_ct.cancelled() => break,
+                }
+            }
+        });
+        tracing::info!(secs = reconcile_secs, "reconcile loop armed");
+    } else {
+        tracing::info!("reconcile loop disabled (LAKITU_RECONCILE_SECS=0)");
+    }
 
     let shutdown_ct = ct.clone();
     axum::serve(listener, app)
