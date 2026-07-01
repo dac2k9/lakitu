@@ -1,15 +1,16 @@
 //! Code-index query — the lakitu side of the shared code "graph-brain"
-//! (token-eff 8205bd, Track 1). Consumes dr-mario's static jina index artifact
+//! (token-eff 8205bd, Track 1). Consumes the static jina index artifact
 //! (`records.jsonl` + `vectors.npy` + `manifest.json` + jina ONNX) and answers
 //! an NL query with the matching symbol-spans PLUS their precise 1-hop graph
 //! neighbors — never whole files.
 //!
-//! Built bottom-up. Landing first (and the build's crux): the **precise
+//! Built bottom-up. Landed first (and the build's crux): the **precise
 //! graph-expand**. A *loose* expand was measured to inject ~52 spans (≈ reading
 //! the whole files) → no token savings; a *precise* 1-hop expand over real
-//! call/type edges holds the budget far lower → net-positive. The embed
-//! (ort/ONNX, bit-matched to the golden) + cosine search + the MCP tool wire in
-//! once the artifact ships.
+//! call/type edges holds the budget far lower → net-positive. [`query`] wires
+//! the full pipeline: embed (in-process ONNX, bit-matched to the reference
+//! golden) → cosine search → precise expand → a staleness check against each
+//! result's pinned source SHA. The MCP tool registration is the next step.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -28,7 +29,7 @@ pub struct Edges {
     pub type_refs: Vec<String>,
 }
 
-/// One indexed symbol-span record — mirrors a line of dr-mario's `records.jsonl`.
+/// One indexed symbol-span record — mirrors a line of the index `records.jsonl`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Record {
     pub id: String,
@@ -78,7 +79,7 @@ fn span_of(r: &Record, hit: bool) -> Span {
 /// that keeps the index net-positive — the measured lever that turns a
 /// *marginal* net-positive into a clean one:
 /// * `expand_top_n` — expand neighbors of only the top-N primary hits, not all
-///   (dr-mario's pre-check: expanding all hits gave ~23 spans; the top-1/2 is
+///   (the Gate-1 pre-check: expanding all hits gave ~23 spans; the top-1/2 is
 ///   what shrinks that toward the ~5–15 budget).
 /// * `per_hit_neighbor_cap` — bound each edge-kind per expanded hit.
 /// * `max_spans` — hard cap on the total returned.
@@ -241,6 +242,181 @@ impl Artifact {
     }
 }
 
+impl Manifest {
+    /// A staleness warning if `repo`'s pinned index SHA no longer matches its
+    /// current HEAD (`current_sha`), else `None`. Handles a short/long SHA
+    /// mismatch either direction (a prefix match still counts as fresh).
+    ///
+    /// The index is a full-rebuild snapshot with no incremental update path —
+    /// this is the cheap half of the freshness requirement a stale index needs
+    /// (surface staleness as a visible risk rather than silently trusting it).
+    /// The other half — actually re-running the extractor on a schedule or a
+    /// commit hook — is index-build-side follow-up, not this query path.
+    pub fn staleness(&self, repo: &str, current_sha: &str) -> Option<String> {
+        let pinned = self.repos.get(repo)?;
+        let fresh = pinned == current_sha
+            || pinned.starts_with(current_sha)
+            || current_sha.starts_with(pinned.as_str());
+        if fresh {
+            None
+        } else {
+            Some(format!(
+                "index for {repo} is pinned at {pinned}, current HEAD is {current_sha} — results may be stale"
+            ))
+        }
+    }
+}
+
+/// In-process jina embedder — turns a raw NL query into the same 768-dim
+/// vector space the index was built in. The pipeline is bit-matched to the
+/// Python reference (`gate1_embed_reference.py`): tokenize (truncate 512) →
+/// ONNX run → masked-mean pool over the sequence (NOT the CLS token, no L2
+/// norm). A pooling/truncation mismatch here would silently break cosine
+/// similarity against the index — `embed_matches_golden` (gated test) guards it.
+pub struct Embedder {
+    session: ort::session::Session,
+    tokenizer: tokenizers::Tokenizer,
+}
+
+impl Embedder {
+    pub fn load(onnx_path: &Path, tokenizer_path: &Path) -> anyhow::Result<Self> {
+        let mut tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
+            .map_err(|e| anyhow::anyhow!("load tokenizer {}: {e}", tokenizer_path.display()))?;
+        tokenizer
+            .with_truncation(Some(tokenizers::TruncationParams {
+                max_length: 512,
+                ..Default::default()
+            }))
+            .map_err(|e| anyhow::anyhow!("set truncation: {e}"))?;
+
+        let session = ort::session::Session::builder()?.commit_from_file(onnx_path)?;
+        Ok(Self { session, tokenizer })
+    }
+
+    /// Embed a raw NL query (no code-normalizer) into a 768-dim vector.
+    pub fn embed(&mut self, query: &str) -> anyhow::Result<Vec<f32>> {
+        let encoding = self
+            .tokenizer
+            .encode(query, true)
+            .map_err(|e| anyhow::anyhow!("tokenize: {e}"))?;
+        let ids: Vec<i64> = encoding.get_ids().iter().map(|&x| x as i64).collect();
+        let mask: Vec<i64> = encoding
+            .get_attention_mask()
+            .iter()
+            .map(|&x| x as i64)
+            .collect();
+        let seq_len = ids.len();
+        anyhow::ensure!(seq_len > 0, "empty tokenization for query");
+
+        let input_ids = ort::value::Tensor::from_array((vec![1i64, seq_len as i64], ids))?;
+        let attention_mask =
+            ort::value::Tensor::from_array((vec![1i64, seq_len as i64], mask.clone()))?;
+
+        let outputs = self.session.run(ort::inputs![
+            "input_ids" => input_ids,
+            "attention_mask" => attention_mask,
+        ])?;
+        let (shape, hidden) = outputs["last_hidden_state"].try_extract_tensor::<f32>()?;
+        anyhow::ensure!(
+            shape.len() == 3 && shape[1] as usize == seq_len,
+            "unexpected last_hidden_state shape {shape:?} for seq_len {seq_len}"
+        );
+        let dim = shape[2] as usize;
+
+        // Masked mean-pool over the sequence axis — NOT the CLS token, no L2
+        // norm (cosine normalizes at compare time).
+        let mut pooled = vec![0f32; dim];
+        let mut mask_sum = 0f32;
+        for t in 0..seq_len {
+            let m = mask[t] as f32;
+            mask_sum += m;
+            let row = &hidden[t * dim..(t + 1) * dim];
+            for (d, v) in row.iter().enumerate() {
+                pooled[d] += v * m;
+            }
+        }
+        anyhow::ensure!(mask_sum > 0.0, "empty attention mask for query");
+        for v in &mut pooled {
+            *v /= mask_sum;
+        }
+        Ok(pooled)
+    }
+}
+
+/// One query-tool result: the ranked hit + its precise graph-expand neighbors,
+/// plus any staleness warnings for the repos those spans came from.
+#[derive(Debug)]
+pub struct QueryResult {
+    pub spans: Vec<Span>,
+    pub staleness_warnings: Vec<String>,
+}
+
+/// Tunable knobs for [`query`] — the levers the Gate-1 net-positive check
+/// measured: `expand_top_n` (expand only the top-N primary hits, the lever
+/// that shrinks a marginal net into a clean one), `per_hit_neighbor_cap`, and
+/// `max_spans` (the hard total budget).
+#[derive(Debug, Clone, Copy)]
+pub struct QueryOpts {
+    pub k: usize,
+    pub max_spans: usize,
+    pub per_hit_neighbor_cap: usize,
+    pub expand_top_n: usize,
+}
+
+impl Default for QueryOpts {
+    /// k=5 (the Gate-1 target); expand only the top-1 hit, ≤4 neighbors/kind,
+    /// ≤15 spans total — the settings the net-positive pre-check validated.
+    fn default() -> Self {
+        Self {
+            k: 5,
+            max_spans: 15,
+            per_hit_neighbor_cap: 4,
+            expand_top_n: 1,
+        }
+    }
+}
+
+/// The full pipeline an MCP query tool would call: embed the NL query in the
+/// index's own vector space, retrieve top-k, precisely expand the top hits'
+/// 1-hop graph neighbors (capped per `opts`), and flag any result whose repo
+/// has drifted past its pinned index SHA. `current_shas` (repo → current
+/// HEAD) is caller-supplied — this module has no opinion on where a repo's
+/// checkout lives on disk.
+pub fn query(
+    artifact: &Artifact,
+    embedder: &mut Embedder,
+    text: &str,
+    opts: QueryOpts,
+    current_shas: &BTreeMap<String, String>,
+) -> anyhow::Result<QueryResult> {
+    let qv = embedder.embed(text)?;
+    let hit_ids = artifact.search(&qv, opts.k);
+    let spans = expand(
+        &artifact.records,
+        &artifact.by_id,
+        &hit_ids,
+        opts.max_spans,
+        opts.per_hit_neighbor_cap,
+        opts.expand_top_n,
+    );
+
+    let mut staleness_warnings = Vec::new();
+    let mut checked: BTreeSet<&str> = BTreeSet::new();
+    for s in &spans {
+        if checked.insert(s.repo.as_str()) {
+            if let Some(sha) = current_shas.get(&s.repo) {
+                if let Some(w) = artifact.manifest.staleness(&s.repo, sha) {
+                    staleness_warnings.push(w);
+                }
+            }
+        }
+    }
+    Ok(QueryResult {
+        spans,
+        staleness_warnings,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,5 +529,88 @@ mod tests {
             top[0], art.records[probe].id,
             "a vector must retrieve itself"
         );
+    }
+
+    #[derive(Deserialize)]
+    struct Golden {
+        query: String,
+        vector: Vec<f32>,
+        l2_norm: f32,
+    }
+
+    /// Loads the jina ONNX model + tokenizer and confirms our Rust/ort
+    /// pipeline matches the Python reference's golden vector — the guard
+    /// against a silent pooling/truncation mismatch. Skipped unless
+    /// `LAKITU_TEST_MODELS` (dir with model.onnx + tokenizer.json) and
+    /// `LAKITU_TEST_GOLDEN` (the golden json) are set.
+    #[test]
+    fn embed_matches_golden() {
+        let (Ok(models_dir), Ok(golden_path)) = (
+            std::env::var("LAKITU_TEST_MODELS"),
+            std::env::var("LAKITU_TEST_GOLDEN"),
+        ) else {
+            eprintln!("skip: set LAKITU_TEST_MODELS + LAKITU_TEST_GOLDEN to check embed parity");
+            return;
+        };
+        let golden: Golden =
+            serde_json::from_reader(std::fs::File::open(&golden_path).expect("open golden"))
+                .expect("parse golden");
+
+        let mut emb = Embedder::load(
+            &Path::new(&models_dir).join("model.onnx"),
+            &Path::new(&models_dir).join("tokenizer.json"),
+        )
+        .expect("load embedder");
+        let v = emb.embed(&golden.query).expect("embed golden query");
+
+        assert_eq!(v.len(), golden.vector.len(), "dim mismatch vs golden");
+        let l2 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (l2 - golden.l2_norm).abs() < 1e-2,
+            "l2 norm {l2} vs golden {}",
+            golden.l2_norm
+        );
+        let dot: f32 = v.iter().zip(&golden.vector).map(|(a, b)| a * b).sum();
+        let cos = dot / (l2 * golden.l2_norm);
+        assert!(cos > 0.9999, "cosine to golden = {cos}, expected ~1.0");
+    }
+
+    /// End-to-end demo: embed a real NL query, search the real artifact,
+    /// expand, print the returned spans. Skipped unless the artifact + model
+    /// env vars are all set. This is the "does the prototype actually work"
+    /// check — run with `--nocapture` to see the retrieved spans.
+    #[test]
+    fn end_to_end_demo_query() {
+        let (Ok(art_dir), Ok(models_dir)) = (
+            std::env::var("LAKITU_TEST_ARTIFACT"),
+            std::env::var("LAKITU_TEST_MODELS"),
+        ) else {
+            eprintln!("skip: set LAKITU_TEST_ARTIFACT + LAKITU_TEST_MODELS for the e2e demo");
+            return;
+        };
+        let art = Artifact::load(Path::new(&art_dir)).expect("load artifact");
+        let mut emb = Embedder::load(
+            &Path::new(&models_dir).join("model.onnx"),
+            &Path::new(&models_dir).join("tokenizer.json"),
+        )
+        .expect("load embedder");
+
+        let q = "how does the reconcile loop decide a shared task's next state";
+        let result =
+            query(&art, &mut emb, q, QueryOpts::default(), &BTreeMap::new()).expect("query");
+        assert!(!result.spans.is_empty(), "expected at least one span back");
+
+        eprintln!("query: {q}");
+        for s in &result.spans {
+            eprintln!(
+                "  [{}] {}:{} {} L{}-{}",
+                if s.hit { "hit" } else { "exp" },
+                s.repo,
+                s.path,
+                s.symbol,
+                s.line_span[0],
+                s.line_span[1]
+            );
+        }
     }
 }

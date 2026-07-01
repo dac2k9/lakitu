@@ -52,4 +52,6 @@ schemars = "1.0"
 anyhow = "1"
 maud = "0.27.0"
 ndarray = "0.17.2"
-ndarray-npy = "0.10.0"
+ndarray-npy = { version = "0.10.0", default-features = false }
+ort = { version = "2.0.0-rc.10", features = ["ndarray"] }
+tokenizers = "0.23.1"
