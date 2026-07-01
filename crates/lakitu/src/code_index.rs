@@ -37,6 +37,9 @@ pub struct Record {
     /// `[start, end]`, 1-based inclusive.
     pub line_span: [u32; 2],
     pub header: String,
+    /// The symbol's source (or window chunk) — what gets injected into context
+    /// in place of a whole-file read.
+    pub body: String,
     #[serde(default)]
     pub edges: Edges,
 }
@@ -49,6 +52,8 @@ pub struct Span {
     pub symbol: String,
     pub line_span: [u32; 2],
     pub header: String,
+    /// The symbol's source — injected in place of a whole-file read.
+    pub body: String,
     /// `true` = a direct retrieval hit; `false` = pulled in by graph-expand.
     pub hit: bool,
 }
@@ -60,6 +65,7 @@ fn span_of(r: &Record, hit: bool) -> Span {
         symbol: r.symbol.clone(),
         line_span: r.line_span,
         header: r.header.clone(),
+        body: r.body.clone(),
         hit,
     }
 }
@@ -134,6 +140,7 @@ mod tests {
             kind: "fn".to_string(),
             line_span: [1, 9],
             header: format!("fn {id}()"),
+            body: format!("fn {id}() {{ /* ... */ }}"),
             edges: Edges {
                 callees: callees.iter().map(|s| s.to_string()).collect(),
                 type_refs: type_refs.iter().map(|s| s.to_string()).collect(),
