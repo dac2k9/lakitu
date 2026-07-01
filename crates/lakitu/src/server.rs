@@ -26,7 +26,7 @@
 //! project item-edit`) rather than silent.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rmcp::{
@@ -265,22 +265,56 @@ struct CodeIndexState {
 }
 
 impl CodeIndexState {
-    /// `LAKITU_CODE_INDEX_DIR` (records.jsonl + vectors.npy + manifest.json)
-    /// and `LAKITU_CODE_INDEX_MODEL_DIR` (model.onnx + tokenizer.json). Unset
-    /// = not configured — the common case until the index has a settled
-    /// production home (today it's Gate-1's experimental 3-repo snapshot).
+    /// No config required: defaults to two well-known locations under the
+    /// SAME fleet root every other part of Lakitu already resolves
+    /// (`fleet::store_root()` — `LAKITU_FLEET_ROOT`/`GENBOT_ROOT` override,
+    /// else `~/.claude/lakitu-fleet`) — `code-index` for the artifact
+    /// (records.jsonl + vectors.npy + manifest.json), `code-index-model` for
+    /// the embedder (model.onnx + tokenizer.json). Siblings, not nested: the
+    /// model is a reusable asset independent of any one artifact snapshot,
+    /// and keeping them separate lets each be provisioned as a single
+    /// symlink. `LAKITU_CODE_INDEX_DIR`/`LAKITU_CODE_INDEX_MODEL_DIR` remain
+    /// an explicit override for dev/testing, but nothing needs to be set for
+    /// every client to pick this up automatically once it's provisioned once
+    /// on a machine.
     fn load() -> anyhow::Result<Self> {
-        let art_dir = std::env::var("LAKITU_CODE_INDEX_DIR")
-            .map_err(|_| anyhow::anyhow!("LAKITU_CODE_INDEX_DIR is not set"))?;
-        let model_dir = std::env::var("LAKITU_CODE_INDEX_MODEL_DIR")
-            .map_err(|_| anyhow::anyhow!("LAKITU_CODE_INDEX_MODEL_DIR is not set"))?;
-        let artifact = crate::code_index::Artifact::load(Path::new(&art_dir))?;
+        Self::load_with_root(
+            env_path_override("LAKITU_CODE_INDEX_DIR"),
+            env_path_override("LAKITU_CODE_INDEX_MODEL_DIR"),
+            fleet::store_root(),
+        )
+    }
+
+    /// The testable core: takes the fleet root as a plain argument instead of
+    /// re-resolving `fleet::store_root()` (which reads env) internally, so a
+    /// test can verify the default-sibling-path logic against an arbitrary
+    /// temp directory with zero env mutation and zero cross-test locking.
+    fn load_with_root(
+        art_override: Option<PathBuf>,
+        model_override: Option<PathBuf>,
+        fleet_root: PathBuf,
+    ) -> anyhow::Result<Self> {
+        let art_dir = art_override.unwrap_or_else(|| fleet_root.join("code-index"));
+        let model_dir = model_override.unwrap_or_else(|| fleet_root.join("code-index-model"));
+        anyhow::ensure!(
+            art_dir.join("manifest.json").exists(),
+            "no code index found at {} (provision it there, or set LAKITU_CODE_INDEX_DIR to override)",
+            art_dir.display()
+        );
+        let artifact = crate::code_index::Artifact::load(&art_dir)?;
         let embedder = crate::code_index::Embedder::load(
-            &Path::new(&model_dir).join("model.onnx"),
-            &Path::new(&model_dir).join("tokenizer.json"),
+            &model_dir.join("model.onnx"),
+            &model_dir.join("tokenizer.json"),
         )?;
         Ok(Self { artifact, embedder })
     }
+}
+
+fn env_path_override(var: &str) -> Option<PathBuf> {
+    std::env::var(var)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
 }
 
 #[derive(Clone)]
@@ -1998,8 +2032,7 @@ impl AgentBoardService {
                 Ok(st) => *guard = Some(st),
                 Err(e) => {
                     return Ok(text(format!(
-                        "code index not available on this daemon: {e} \
-                         (set LAKITU_CODE_INDEX_DIR + LAKITU_CODE_INDEX_MODEL_DIR to enable)"
+                        "code index not available on this daemon: {e}"
                     )));
                 }
             }
@@ -3610,6 +3643,44 @@ https://github.com/acme/web/pull/123
         );
     }
 
+    /// The "no config" requirement, proven directly against the resolution
+    /// logic: with NO overrides passed, `code-index`/`code-index-model`
+    /// under an arbitrary root must be found and loaded. No env mutation, no
+    /// locking — `load_with_root` takes the root as a plain argument, so
+    /// this can't collide with any other test. Skipped unless
+    /// `LAKITU_TEST_ARTIFACT`/`LAKITU_TEST_MODELS` are set.
+    #[test]
+    fn code_index_state_resolves_default_sibling_paths_with_no_overrides() {
+        let (Ok(art_dir), Ok(models_dir)) = (
+            std::env::var("LAKITU_TEST_ARTIFACT"),
+            std::env::var("LAKITU_TEST_MODELS"),
+        ) else {
+            eprintln!(
+                "skip: set LAKITU_TEST_ARTIFACT + LAKITU_TEST_MODELS to test default resolution"
+            );
+            return;
+        };
+        let root = std::env::temp_dir().join(format!(
+            "lakitu-code-index-default-path-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root); // in case a prior run was killed mid-test
+        std::fs::create_dir_all(&root).expect("create scratch root");
+        std::os::unix::fs::symlink(&art_dir, root.join("code-index")).expect("symlink code-index");
+        std::os::unix::fs::symlink(&models_dir, root.join("code-index-model"))
+            .expect("symlink code-index-model");
+
+        let result = CodeIndexState::load_with_root(None, None, root.clone());
+        let _ = std::fs::remove_dir_all(&root);
+
+        let state = result.expect("must resolve + load via the default sibling paths alone");
+        assert!(
+            state.artifact.records.len() > 100,
+            "expected the real artifact's records to load, got {}",
+            state.artifact.records.len()
+        );
+    }
+
     /// Serializes the two `code_index_query` tests' env mutation across the
     /// WHOLE test (set → the tool's `.await` → unset), so one test's write
     /// can never land between the other's write and its subsequent read.
@@ -3620,10 +3691,16 @@ https://github.com/acme/web/pull/123
     #[tokio::test]
     async fn code_index_query_reports_not_configured_when_env_unset() {
         let _env = CODE_INDEX_ENV_LOCK.lock().await;
-        // SAFETY: the lock above is held for this whole test, so no other
-        // code_index_query test can mutate these two keys concurrently.
+        // Point the override at guaranteed-empty scratch space, rather than
+        // unsetting it and relying on the DEFAULT (fleet::store_root()) path
+        // being empty too — that now depends on what's provisioned on the
+        // machine running this test, which this test shouldn't assume either
+        // way. This also avoids touching LAKITU_FLEET_ROOT, so no
+        // coordination with fleet.rs's own HOME-mutating tests is needed.
+        let empty = std::env::temp_dir().join("lakitu-code-index-test-empty-scratch");
+        // SAFETY: the lock above is held for this whole test.
         unsafe {
-            std::env::remove_var("LAKITU_CODE_INDEX_DIR");
+            std::env::set_var("LAKITU_CODE_INDEX_DIR", &empty);
             std::env::remove_var("LAKITU_CODE_INDEX_MODEL_DIR");
         }
         let svc = AgentBoardService::new();
@@ -3636,9 +3713,13 @@ https://github.com/acme/web/pull/123
             .await
             .expect("tool call itself should not error");
         let text = result.content[0].as_text().unwrap().text.clone();
+        // SAFETY: still inside the lock guard from above.
+        unsafe {
+            std::env::remove_var("LAKITU_CODE_INDEX_DIR");
+        }
         assert!(
-            text.contains("not available") && text.contains("LAKITU_CODE_INDEX_DIR"),
-            "expected a clear not-configured message, got: {text}"
+            text.contains("not available") && text.contains(empty.to_str().unwrap()),
+            "expected a clear not-configured message naming the missing path, got: {text}"
         );
     }
 
