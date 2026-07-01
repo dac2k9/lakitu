@@ -1682,6 +1682,7 @@ dependencies = [
  "tokenizers",
  "tokio",
  "tokio-util",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "webbrowser",

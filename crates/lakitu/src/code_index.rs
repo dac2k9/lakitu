@@ -13,10 +13,10 @@
 //! result's pinned source SHA. The MCP tool registration is the next step.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ndarray::Array2;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// 1-hop edges of a record. Targets are record **ids** (O(1) resolve), split by
 /// kind so each can be capped/weighted, and internal-only (an edge with no
@@ -48,7 +48,7 @@ pub struct Record {
 }
 
 /// A span returned to the caller — a hit or an expanded neighbor, never a file.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Span {
     pub repo: String,
     pub path: String,
@@ -399,9 +399,49 @@ impl Embedder {
     }
 }
 
+/// An artifact + embedder pair, ready to query — the unit `query()` operates
+/// on. Bundling the two lets a caller hold ("has a usable index" or not) as
+/// one `Option`, and is deliberately the ONLY thing in this module that knows
+/// about the on-disk layout (`code-index`/`code-index-model` siblings) —
+/// engine logic, no lakitu-fleet coupling: `load_with_root` takes the root as
+/// a plain argument rather than reaching for any fleet-specific default
+/// itself, so it stays reusable outside lakitu (e.g. if this module ever
+/// moves to its own repo, with lakitu depending on it instead of hosting it).
+/// Fleet-specific defaulting (env overrides, `fleet::store_root()`) is
+/// deliberately kept OUT of this module, one layer up.
+pub(crate) struct CodeIndexState {
+    pub(crate) artifact: Artifact,
+    pub(crate) embedder: Embedder,
+}
+
+impl CodeIndexState {
+    /// The testable core: `code-index`/`code-index-model` siblings under
+    /// `fleet_root`, unless overridden. No env access, no defaults resolved
+    /// here — a caller (or a test) passes exactly the root it wants.
+    pub(crate) fn load_with_root(
+        art_override: Option<PathBuf>,
+        model_override: Option<PathBuf>,
+        fleet_root: PathBuf,
+    ) -> anyhow::Result<Self> {
+        let art_dir = art_override.unwrap_or_else(|| fleet_root.join("code-index"));
+        let model_dir = model_override.unwrap_or_else(|| fleet_root.join("code-index-model"));
+        anyhow::ensure!(
+            art_dir.join("manifest.json").exists(),
+            "no code index found at {} (provision it there, or set LAKITU_CODE_INDEX_DIR to override)",
+            art_dir.display()
+        );
+        let artifact = Artifact::load(&art_dir)?;
+        let embedder = Embedder::load(
+            &model_dir.join("model.onnx"),
+            &model_dir.join("tokenizer.json"),
+        )?;
+        Ok(Self { artifact, embedder })
+    }
+}
+
 /// One query-tool result: the ranked hit + its precise graph-expand neighbors,
 /// plus any staleness warnings for the repos those spans came from.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct QueryResult {
     pub spans: Vec<Span>,
     pub staleness_warnings: Vec<String>,

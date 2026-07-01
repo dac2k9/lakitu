@@ -55,3 +55,8 @@ ndarray = "0.17.2"
 ndarray-npy = { version = "0.10.0", default-features = false }
 ort = { version = "2.0.0-rc.10", features = ["ndarray"] }
 tokenizers = "0.23.1"
+
+[dev-dependencies]
+# Drives a `Router` directly in tests (`oneshot`) without a real socket —
+# already resolved transitively via axum/rmcp, just not previously exposed.
+tower = { version = "0.5", default-features = false, features = ["util"] }
