@@ -87,7 +87,11 @@ async fn view_partial(
 ) -> Html<String> {
     let snap = crate::fleet::snapshot().await;
     let view = match tab.as_str() {
-        "tasks" => tasks_fragment(&snap, q.get("show_done").is_some_and(|v| v == "1")),
+        "tasks" => tasks_fragment(
+            &snap,
+            q.get("show_done").is_some_and(|v| v == "1"),
+            q.get("show_completed").is_some_and(|v| v == "1"),
+        ),
         _ => live(&snap),
     };
     Html(view.into_string())
@@ -179,13 +183,35 @@ fn asset(ct: &'static str, body: &'static str) -> impl IntoResponse {
 
 // ---- Templates -------------------------------------------------------------
 
+/// Is this linked ref still open work? Open issues and open/draft PRs are "left
+/// to do"; closed issues and merged/closed PRs are completed. Unknown (uncached)
+/// state counts as active, so a ref is never hidden merely because we don't yet
+/// know its state.
+fn ref_active(r: &TaskRefDto) -> bool {
+    matches!(r.state.as_deref(), None | Some("open") | Some("draft"))
+}
+
+/// The tasks-fragment URL carrying the active view toggles, so the 5s self-poll
+/// and each toggle button preserve the others' state.
+fn tasks_url(show_done: bool, show_completed: bool) -> String {
+    let q = match (show_done, show_completed) {
+        (false, false) => "",
+        (true, false) => "?show_done=1",
+        (false, true) => "?show_completed=1",
+        (true, true) => "?show_done=1&show_completed=1",
+    };
+    format!("/partial/view/tasks{q}")
+}
+
 /// The "tasks" tab — a fleet-wide view of every shared task: a card per
 /// `SharedTask` with its scope, participants, linked issues/PRs, and a
 /// Start→Goal timeline. Live like the Fleet board (self-polls `#view`) at a
-/// calmer 5s, since shared tasks move on GitHub-sync cadence. Done tasks are
-/// hidden by default (mirrors the TUI's `include_done=false`) so the board
-/// stays on live work; `show_done` reveals them and is preserved across polls.
-fn tasks_fragment(snap: &SnapshotDto, show_done: bool) -> Markup {
+/// calmer 5s, since shared tasks move on GitHub-sync cadence. Two filters keep
+/// the board on live work, both defaulting to "hidden" and preserved across
+/// polls: done *tasks* are hidden (mirrors the TUI's `include_done=false`,
+/// revealed by `show_done`), and completed *refs* — closed issues, merged/closed
+/// PRs — are auto-hidden within each card (revealed by `show_completed`).
+fn tasks_fragment(snap: &SnapshotDto, show_done: bool, show_completed: bool) -> Markup {
     // Counts span ALL shared tasks, so the "done" vital stays honest even when
     // the done cards are hidden.
     let count = |s: &str| snap.shared_tasks.iter().filter(|t| t.state == s).count();
@@ -204,12 +230,16 @@ fn tasks_fragment(snap: &SnapshotDto, show_done: bool) -> Markup {
             .then_with(|| b.updated.cmp(&a.updated))
     });
 
-    // The self-poll carries the toggle so a refresh doesn't reset it.
-    let poll_url = if show_done {
-        "/partial/view/tasks?show_done=1"
-    } else {
-        "/partial/view/tasks"
-    };
+    // Completed refs (closed issues, merged/closed PRs) among the *visible*
+    // tasks — gates the "hide completed" toggle and is exactly what it removes.
+    let completed_refs = tasks
+        .iter()
+        .flat_map(|t| t.issues.iter().chain(t.prs.iter()))
+        .filter(|r| !ref_active(r))
+        .count();
+
+    // The self-poll carries both toggles so a refresh doesn't reset them.
+    let poll_url = tasks_url(show_done, show_completed);
 
     html! {
         main id="view" class="live tasks" hx-get=(poll_url) hx-trigger="every 5s" hx-swap="outerHTML" {
@@ -221,11 +251,24 @@ fn tasks_fragment(snap: &SnapshotDto, show_done: bool) -> Markup {
                     (vital("blocked", count("blocked"), "v-block"))
                     (vital("done", done_total, "v-done"))
                 }
-                @if done_total > 0 {
-                    @if show_done {
-                        button class="done-toggle" hx-get="/partial/view/tasks" hx-target="#view" hx-swap="outerHTML" { "hide done" }
-                    } @else {
-                        button class="done-toggle" hx-get="/partial/view/tasks?show_done=1" hx-target="#view" hx-swap="outerHTML" { "show done (" (done_total) ")" }
+                @if done_total > 0 || completed_refs > 0 {
+                    div class="toggles" {
+                        @if done_total > 0 {
+                            @if show_done {
+                                button class="done-toggle" hx-get=(tasks_url(false, show_completed)) hx-target="#view" hx-swap="outerHTML" { "hide done" }
+                            } @else {
+                                button class="done-toggle" hx-get=(tasks_url(true, show_completed)) hx-target="#view" hx-swap="outerHTML" { "show done (" (done_total) ")" }
+                            }
+                        }
+                        @if completed_refs > 0 {
+                            @if show_completed {
+                                button class="done-toggle" title="Hide closed issues & merged/closed PRs — leave only open work"
+                                    hx-get=(tasks_url(show_done, false)) hx-target="#view" hx-swap="outerHTML" { "hide completed" }
+                            } @else {
+                                button class="done-toggle" title="Show completed issues & PRs (closed issues, merged/closed PRs)"
+                                    hx-get=(tasks_url(show_done, true)) hx-target="#view" hx-swap="outerHTML" { "show completed (" (completed_refs) ")" }
+                            }
+                        }
                     }
                 }
             }
@@ -247,13 +290,13 @@ fn tasks_fragment(snap: &SnapshotDto, show_done: bool) -> Markup {
                         div class="cs-title" { "All clear" }
                         div class="cs-sub" {
                             "All " (done_total) " shared task" @if done_total != 1 { "s" } " done. "
-                            button class="done-toggle inline" hx-get="/partial/view/tasks?show_done=1" hx-target="#view" hx-swap="outerHTML" { "show done" }
+                            button class="done-toggle inline" hx-get=(tasks_url(true, show_completed)) hx-target="#view" hx-swap="outerHTML" { "show done" }
                         }
                     }
                 }
             } @else {
                 div class="tgrid" {
-                    @for t in &tasks { (shared_task_card(t, snap)) }
+                    @for t in &tasks { (shared_task_card(t, snap, show_completed)) }
                 }
             }
         }
@@ -262,7 +305,7 @@ fn tasks_fragment(snap: &SnapshotDto, show_done: bool) -> Markup {
 
 /// One shared-task card: head (state glyph · title · scope · state) over the
 /// goal, participants, linked issues/PRs, and the Start→Goal timeline.
-fn shared_task_card(t: &SharedTaskDto, snap: &SnapshotDto) -> Markup {
+fn shared_task_card(t: &SharedTaskDto, snap: &SnapshotDto, show_completed: bool) -> Markup {
     let cls = task_state_cls(&t.state);
     let active = t.state == "active";
     let card_cls = format!(
@@ -270,6 +313,10 @@ fn shared_task_card(t: &SharedTaskDto, snap: &SnapshotDto) -> Markup {
         if t.state == "blocked" { " blocked" } else { "" }
     );
     let linked = t.issues.len() + t.prs.len();
+    // Completed issues/PRs are auto-hidden unless the viewer opts to show them.
+    let hide_completed = !show_completed;
+    let open_issues = t.issues.iter().filter(|r| ref_active(r)).count();
+    let open_prs = t.prs.iter().filter(|r| ref_active(r)).count();
 
     html! {
         article class=(card_cls) {
@@ -294,8 +341,31 @@ fn shared_task_card(t: &SharedTaskDto, snap: &SnapshotDto) -> Markup {
 
             @if linked > 0 {
                 div class="refs" {
-                    @for i in &t.issues { (ref_pill(i, "issue")) }
-                    @for p in &t.prs { (ref_pill(p, "pr")) }
+                    span class="refs-head" { "Linked" }
+                    @if hide_completed && open_issues == 0 && open_prs == 0 {
+                        span class="refs-allclear" { "✓ all " (linked) " done" }
+                    } @else {
+                        @if !t.issues.is_empty() && (!hide_completed || open_issues > 0) {
+                            div class="refgroup" {
+                                span class="refgroup-label" { "issues" }
+                                div class="refpills" {
+                                    @for i in &t.issues {
+                                        @if !hide_completed || ref_active(i) { (ref_pill(i, "issue")) }
+                                    }
+                                }
+                            }
+                        }
+                        @if !t.prs.is_empty() && (!hide_completed || open_prs > 0) {
+                            div class="refgroup" {
+                                span class="refgroup-label" { "prs" }
+                                div class="refpills" {
+                                    @for p in &t.prs {
+                                        @if !hide_completed || ref_active(p) { (ref_pill(p, "pr")) }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -352,7 +422,11 @@ fn ref_pill(r: &TaskRefDto, kind: &str) -> Markup {
         ("issues", "🔘", "issue")
     };
     let href = format!("https://github.com/{}/{}/{}", r.repo, seg, r.number);
-    let state_cls = r.state.as_deref().map(ref_state_cls).unwrap_or("");
+    let state_cls = r
+        .state
+        .as_deref()
+        .map(|s| ref_state_cls(s, kind))
+        .unwrap_or("");
     let title = match &r.state {
         Some(s) => format!("{word} {}#{} · {s} — open on GitHub", r.repo, r.number),
         None => format!("{word} {}#{} — open on GitHub", r.repo, r.number),
@@ -363,7 +437,7 @@ fn ref_pill(r: &TaskRefDto, kind: &str) -> Markup {
             span class="pill-mark" { (emoji) }
             (short) "#" (r.number)
             @if let Some(s) = &r.state {
-                @let dot = ref_state_dot(s);
+                @let dot = ref_state_dot(s, kind);
                 @if !dot.is_empty() { span class="pill-state" { (dot) } }
             }
         }
@@ -371,25 +445,40 @@ fn ref_pill(r: &TaskRefDto, kind: &str) -> Markup {
 }
 
 /// The status dot for a linked ref's cached GitHub state: 🟢 open · ⚪ draft ·
-/// 🟣 merged · 🔴 closed. Unknown ⇒ empty (no dot).
-fn ref_state_dot(state: &str) -> &'static str {
+/// 🟣 merged/done · 🔴 closed-unmerged PR. A *closed issue* is done (🟣), not red —
+/// red is reserved for a PR that closed without merging.
+fn ref_state_dot(state: &str, kind: &str) -> &'static str {
     match state {
         "open" => "🟢",
         "draft" => "⚪",
         "merged" => "🟣",
-        "closed" => "🔴",
+        // closed issue = completed (purple, like a merged PR); closed PR = didn't merge (red)
+        "closed" => {
+            if kind == "issue" {
+                "🟣"
+            } else {
+                "🔴"
+            }
+        }
         _ => "",
     }
 }
 
 /// A border-tint class for a linked ref's state — a quieter scannability cue
 /// alongside the dot.
-fn ref_state_cls(state: &str) -> &'static str {
+fn ref_state_cls(state: &str, kind: &str) -> &'static str {
     match state {
         "open" => "s-open",
         "draft" => "s-draft",
         "merged" => "s-merged",
-        "closed" => "s-closed",
+        // closed issue tints like "done" (purple); closed PR tints red (unmerged)
+        "closed" => {
+            if kind == "issue" {
+                "s-merged"
+            } else {
+                "s-closed"
+            }
+        }
         _ => "",
     }
 }
@@ -691,20 +780,6 @@ fn agent_card(a: &AgentDto, snap: &SnapshotDto) -> Markup {
                 }
                 span class="dot-sep" { "·" }
                 span { (seen(a)) }
-            }
-
-            @if !open.is_empty() {
-                ul class="tasklist" {
-                    @for t in open.iter().take(3) {
-                        li {
-                            span class="tbox" { "▢" }
-                            span class="ttext" { (t.text) }
-                        }
-                    }
-                    @if open.len() > 3 {
-                        li class="more" { "+ " (open.len() - 3) " more" }
-                    }
-                }
             }
         }
     }
