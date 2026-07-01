@@ -25,9 +25,18 @@
 //! restart re-fetches. Stale-ID failure mode is loud (404 from `gh
 //! project item-edit`) rather than silent.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::{
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    middleware,
+    response::{IntoResponse, Response},
+    routing::post,
+};
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -37,8 +46,9 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
+use crate::code_index::CodeIndexState;
 use crate::fleet;
 use crate::persona;
 
@@ -255,10 +265,143 @@ struct Caches {
     board: HashMap<(String, u32), BoardCache>,
 }
 
+/// No config required: defaults to two well-known locations under the SAME
+/// fleet root every other part of Lakitu already resolves
+/// (`fleet::store_root()` — `LAKITU_FLEET_ROOT`/`GENBOT_ROOT` override, else
+/// `~/.claude/lakitu-fleet`) — `code-index` for the artifact (records.jsonl +
+/// vectors.npy + manifest.json), `code-index-model` for the embedder
+/// (model.onnx + tokenizer.json). Siblings, not nested: the model is a
+/// reusable asset independent of any one artifact snapshot, and keeping them
+/// separate lets each be provisioned as a single symlink.
+/// `LAKITU_CODE_INDEX_DIR`/`LAKITU_CODE_INDEX_MODEL_DIR` remain an explicit
+/// override for dev/testing, but nothing needs to be set for every client to
+/// pick this up automatically once it's provisioned once on a machine. The
+/// lakitu-fleet-specific defaulting lives here, deliberately one layer above
+/// `CodeIndexState::load_with_root` (which knows nothing about fleets or env
+/// vars) — see that method's doc comment.
+fn load_code_index_state() -> anyhow::Result<CodeIndexState> {
+    CodeIndexState::load_with_root(
+        env_path_override("LAKITU_CODE_INDEX_DIR"),
+        env_path_override("LAKITU_CODE_INDEX_MODEL_DIR"),
+        fleet::store_root(),
+    )
+}
+
+fn env_path_override(var: &str) -> Option<PathBuf> {
+    std::env::var(var)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The shared, lazily-loaded code-index cache — one per daemon, handed to
+/// both the MCP tool and the REST handler so neither reloads the ~650MB
+/// artifact+model per call.
+pub(crate) type CodeIndexShared = Arc<Mutex<Option<CodeIndexState>>>;
+
+/// Two deliberately-distinct failure phases: a load failure means the index
+/// isn't configured on this daemon at all (soft/expected — every caller
+/// renders it as a friendly message, not an error); a query failure means
+/// something broke on an already-loaded index (a real bug — callers should
+/// surface it as one).
+pub(crate) enum CodeIndexQueryError {
+    NotConfigured(anyhow::Error),
+    Query(anyhow::Error),
+}
+
+/// The core behind both `code_index_query` (MCP) and the `/v1/code-index/query`
+/// REST handler: lazily load the index into `shared` if needed, then run the
+/// query. Kept in one place so the two surfaces can't drift.
+pub(crate) async fn code_index_query_core(
+    shared: &CodeIndexShared,
+    query: &str,
+    expand_top_n: Option<usize>,
+    repo: Option<&str>,
+) -> Result<crate::code_index::QueryResult, CodeIndexQueryError> {
+    let mut guard = shared.lock().await;
+    if guard.is_none() {
+        *guard = Some(load_code_index_state().map_err(CodeIndexQueryError::NotConfigured)?);
+    }
+    let state = guard.as_mut().expect("just set or already Some above");
+
+    let opts = crate::code_index::QueryOpts {
+        expand_top_n: expand_top_n.unwrap_or(1),
+        ..Default::default()
+    };
+    // Staleness checking needs a repo -> local-checkout-path source (the
+    // registry only exposes that on disk, not through AgentSummary) — a
+    // fast-follow, not blocking this tool.
+    crate::code_index::query(
+        &state.artifact,
+        &mut state.embedder,
+        query,
+        opts,
+        repo,
+        &BTreeMap::new(),
+    )
+    .map_err(CodeIndexQueryError::Query)
+}
+
+/// The code-index query endpoint's HTTP request body — a plain-JSON mirror of
+/// [`CodeIndexQueryRequest`], kept separate because that type's `schemars`
+/// derive and per-field descriptions are MCP-tool-schema concerns, not REST
+/// wire format.
+#[derive(Debug, Deserialize)]
+struct CodeIndexQueryHttpRequest {
+    query: String,
+    #[serde(default)]
+    expand_top_n: Option<usize>,
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+/// `POST /code-index/query` handler — the JSON form of the `code_index_query`
+/// MCP tool, for a browser (which can't speak MCP). See [`code_index_router`]
+/// for why this is unauthenticated.
+async fn code_index_query_http(
+    State(shared): State<CodeIndexShared>,
+    Json(req): Json<CodeIndexQueryHttpRequest>,
+) -> Response {
+    match code_index_query_core(&shared, &req.query, req.expand_top_n, req.repo.as_deref()).await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(CodeIndexQueryError::NotConfigured(e)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": format!("code index not available on this daemon: {e}")
+            })),
+        )
+            .into_response(),
+        Err(CodeIndexQueryError::Query(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// The code-index query surface as JSON, for the web cockpit's search box.
+/// Deliberately NOT part of `rest.rs`'s bearer-gated `/v1` surface: a query
+/// here triggers live backend compute (an ONNX embed + vector search)
+/// straight from a page the browser renders with no token — the same
+/// "loopback-only, no bearer" posture `web::router()` already uses and for
+/// the same reason (the browser carries no token, so this must never be
+/// reachable off-box). Reuses `web::host_guard` rather than a second copy of
+/// that check. The caller (`daemon.rs`) must mount this the same way
+/// `web::router()` is mounted: merged in AFTER the bearer-auth `.layer()`
+/// call, and only on a loopback bind.
+pub(crate) fn code_index_router(shared: CodeIndexShared) -> Router {
+    Router::new()
+        .route("/code-index/query", post(code_index_query_http))
+        .with_state(shared)
+        .layer(middleware::from_fn(crate::web::host_guard))
+}
+
 #[derive(Clone)]
 pub struct AgentBoardService {
     tool_router: ToolRouter<Self>,
     caches: Arc<RwLock<Caches>>,
+    code_index: CodeIndexShared,
 }
 
 impl Default for AgentBoardService {
@@ -273,7 +416,15 @@ impl AgentBoardService {
         Self {
             tool_router: Self::tool_router(),
             caches: Arc::new(RwLock::new(Caches::default())),
+            code_index: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// The shared code-index cache handle, for surfaces outside the MCP tool
+    /// router (e.g. the REST endpoint) that need to reuse the same
+    /// lazily-loaded artifact+embedder rather than loading their own copy.
+    pub(crate) fn code_index_handle(&self) -> CodeIndexShared {
+        self.code_index.clone()
     }
 
     /// Resolve `repo_slug`'s board (auto-discovered + cached) and its field/
@@ -1944,6 +2095,73 @@ impl AgentBoardService {
         let want = req.id.as_deref().map(fleet::sanitize);
         Ok(text(reconcile_shared_tasks(want).await.out))
     }
+
+    #[tool(
+        name = "code_index_query",
+        description = "Semantic search over the shared code index (the \"graph-brain\", 8205bd): \
+        ask a plain-English question about an indexed codebase and get back the matching code \
+        SPANS (never a whole file) plus their real 1-hop call/type-graph neighbors — measured \
+        ~95% cheaper than reading the whole file(s) with the same answer, across a real 40-query \
+        eval. Each span carries its cosine score (None on an expanded neighbor, which wasn't \
+        retrieved by similarity); a leading ⚠ means the top score was too low to trust — verify \
+        before using those. PROTOTYPE SCOPE: covers fossid-mcp, fossid-vscode, and dac2k9/lakitu \
+        only, from a hand-built snapshot (not auto-updated on merge yet) — even a confident hit \
+        can be stale; treat it as a strong lead, not ground truth. Returns a clear message (not \
+        an error) if this daemon has no index configured."
+    )]
+    async fn code_index_query(
+        &self,
+        Parameters(req): Parameters<CodeIndexQueryRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = match code_index_query_core(
+            &self.code_index,
+            &req.query,
+            req.expand_top_n,
+            req.repo.as_deref(),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(CodeIndexQueryError::NotConfigured(e)) => {
+                return Ok(text(format!(
+                    "code index not available on this daemon: {e}"
+                )));
+            }
+            Err(CodeIndexQueryError::Query(e)) => return Err(mcp(e)),
+        };
+
+        let mut out = String::new();
+        if result.low_confidence {
+            out.push_str(
+                "⚠ no strong match — the results below scored low; they may be the closest \
+                 available rather than a real answer. Verify before trusting.\n",
+            );
+        }
+        for w in &result.staleness_warnings {
+            out.push_str(&format!("⚠ {w}\n"));
+        }
+        if result.spans.is_empty() {
+            out.push_str("(no matches)\n");
+        }
+        for s in &result.spans {
+            let score = s
+                .score
+                .map(|v| format!(" score={v:.2}"))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "\n[{}{}] {} {}::{} L{}-{}\n```\n{}\n```\n",
+                if s.hit { "hit" } else { "exp" },
+                score,
+                s.repo,
+                s.path,
+                s.symbol,
+                s.line_span[0],
+                s.line_span[1],
+                s.body
+            ));
+        }
+        Ok(text(out))
+    }
 }
 
 /// Counts + rendered text from one shared-task reconcile pass.
@@ -2645,6 +2863,24 @@ pub struct ListSharedTasksRequest {
     )]
     #[serde(default)]
     pub include_archived: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CodeIndexQueryRequest {
+    #[schemars(
+        description = "Plain-English question about the indexed codebase(s), e.g. \"how does X call Y\" or \"where is Z decided\" — embedded directly, no need to phrase it as search keywords."
+    )]
+    pub query: String,
+    #[schemars(
+        description = "How many of the top hits to graph-expand (pull in their real callers/callees), not just return standalone. Default 1 — cheapest, best for a direct \"where is X\" lookup. Raise to 2-3 for a cross-symbol \"how does X use Y\" question, where the answer likely needs a hit's neighbors too."
+    )]
+    #[serde(default)]
+    pub expand_top_n: Option<usize>,
+    #[schemars(
+        description = "Optional: restrict results to one repo (e.g. \"fossid-ab/fossid-mcp\"). Phrasing the repo INTO the query text (e.g. \"in fossid-mcp, how does...\") does NOT reliably scope results — measured cross-repo bleed even with that hint. Use this param instead when the repo is known."
+    )]
+    #[serde(default)]
+    pub repo: Option<String>,
 }
 
 /// Declared agent state. Lowercase on the wire to match the heartbeat
@@ -3479,5 +3715,340 @@ https://github.com/acme/web/pull/123
             verbose.contains("helps=\"a long capability blurb that costs tokens\""),
             "verbose includes the blurb"
         );
+    }
+
+    /// The "no config" requirement, proven directly against the resolution
+    /// logic: with NO overrides passed, `code-index`/`code-index-model`
+    /// under an arbitrary root must be found and loaded. No env mutation, no
+    /// locking — `load_with_root` takes the root as a plain argument, so
+    /// this can't collide with any other test. Skipped unless
+    /// `LAKITU_TEST_ARTIFACT`/`LAKITU_TEST_MODELS` are set.
+    #[test]
+    fn code_index_state_resolves_default_sibling_paths_with_no_overrides() {
+        let (Ok(art_dir), Ok(models_dir)) = (
+            std::env::var("LAKITU_TEST_ARTIFACT"),
+            std::env::var("LAKITU_TEST_MODELS"),
+        ) else {
+            eprintln!(
+                "skip: set LAKITU_TEST_ARTIFACT + LAKITU_TEST_MODELS to test default resolution"
+            );
+            return;
+        };
+        let root = std::env::temp_dir().join(format!(
+            "lakitu-code-index-default-path-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root); // in case a prior run was killed mid-test
+        std::fs::create_dir_all(&root).expect("create scratch root");
+        std::os::unix::fs::symlink(&art_dir, root.join("code-index")).expect("symlink code-index");
+        std::os::unix::fs::symlink(&models_dir, root.join("code-index-model"))
+            .expect("symlink code-index-model");
+
+        let result = CodeIndexState::load_with_root(None, None, root.clone());
+        let _ = std::fs::remove_dir_all(&root);
+
+        let state = result.expect("must resolve + load via the default sibling paths alone");
+        assert!(
+            state.artifact.records.len() > 100,
+            "expected the real artifact's records to load, got {}",
+            state.artifact.records.len()
+        );
+    }
+
+    /// Serializes the two `code_index_query` tests' env mutation across the
+    /// WHOLE test (set → the tool's `.await` → unset), so one test's write
+    /// can never land between the other's write and its subsequent read.
+    /// `std::sync::Mutex` (`fleet::TEST_ENV_LOCK`) can't be held across an
+    /// await safely (clippy::await_holding_lock) — a `tokio::sync::Mutex` can.
+    static CODE_INDEX_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+    #[tokio::test]
+    async fn code_index_query_reports_not_configured_when_env_unset() {
+        let _env = CODE_INDEX_ENV_LOCK.lock().await;
+        // Point the override at guaranteed-empty scratch space, rather than
+        // unsetting it and relying on the DEFAULT (fleet::store_root()) path
+        // being empty too — that now depends on what's provisioned on the
+        // machine running this test, which this test shouldn't assume either
+        // way. This also avoids touching LAKITU_FLEET_ROOT, so no
+        // coordination with fleet.rs's own HOME-mutating tests is needed.
+        let empty = std::env::temp_dir().join("lakitu-code-index-test-empty-scratch");
+        // SAFETY: the lock above is held for this whole test.
+        unsafe {
+            std::env::set_var("LAKITU_CODE_INDEX_DIR", &empty);
+            std::env::remove_var("LAKITU_CODE_INDEX_MODEL_DIR");
+        }
+        let svc = AgentBoardService::new();
+        let result = svc
+            .code_index_query(Parameters(CodeIndexQueryRequest {
+                query: "anything".to_string(),
+                expand_top_n: None,
+                repo: None,
+            }))
+            .await
+            .expect("tool call itself should not error");
+        let text = result.content[0].as_text().unwrap().text.clone();
+        // SAFETY: still inside the lock guard from above.
+        unsafe {
+            std::env::remove_var("LAKITU_CODE_INDEX_DIR");
+        }
+        assert!(
+            text.contains("not available") && text.contains(empty.to_str().unwrap()),
+            "expected a clear not-configured message naming the missing path, got: {text}"
+        );
+    }
+
+    /// Calls the actual registered MCP tool end-to-end against the real
+    /// artifact + model — not just the underlying `code_index` library, the
+    /// tool as a fleet agent would invoke it. Skipped unless
+    /// `LAKITU_TEST_ARTIFACT`/`LAKITU_TEST_MODELS` are set (see code_index.rs).
+    #[tokio::test]
+    async fn code_index_query_tool_returns_relevant_spans() {
+        let (Ok(art_dir), Ok(models_dir)) = (
+            std::env::var("LAKITU_TEST_ARTIFACT"),
+            std::env::var("LAKITU_TEST_MODELS"),
+        ) else {
+            eprintln!("skip: set LAKITU_TEST_ARTIFACT + LAKITU_TEST_MODELS to test the live tool");
+            return;
+        };
+        let _env = CODE_INDEX_ENV_LOCK.lock().await;
+        // SAFETY: see the sibling test above — held for this whole test.
+        unsafe {
+            std::env::set_var("LAKITU_CODE_INDEX_DIR", &art_dir);
+            std::env::set_var("LAKITU_CODE_INDEX_MODEL_DIR", &models_dir);
+        }
+        let svc = AgentBoardService::new();
+        let result = svc
+            .code_index_query(Parameters(CodeIndexQueryRequest {
+                query: "how does the reconcile loop decide a shared task's next state".to_string(),
+                expand_top_n: None,
+                repo: None,
+            }))
+            .await
+            .expect("tool call should succeed with a configured index");
+        let text = result.content[0].as_text().unwrap().text.clone();
+        assert!(
+            text.contains("reconciled_to") || text.contains("reconcile_advance"),
+            "expected a relevant symbol in the tool output, got: {text}"
+        );
+        assert!(
+            text.contains("score="),
+            "a real hit must render its cosine score, got: {text}"
+        );
+        assert!(
+            !text.starts_with('⚠'),
+            "a genuinely relevant query must not trip the low-confidence warning, got: {text}"
+        );
+
+        // The out-of-domain stress case: no correct answer exists anywhere in
+        // the index. This is exactly what low_confidence exists to flag —
+        // without it, this response is indistinguishable in shape from the
+        // real hit above.
+        let junk = svc
+            .code_index_query(Parameters(CodeIndexQueryRequest {
+                query: "what's a good recipe for pasta carbonara".to_string(),
+                expand_top_n: None,
+                repo: None,
+            }))
+            .await
+            .expect("tool call itself should not error even on a nonsense query");
+        let junk_text = junk.content[0].as_text().unwrap().text.clone();
+        assert!(
+            junk_text.starts_with('⚠'),
+            "an out-of-domain query must trip the low-confidence warning, got: {junk_text}"
+        );
+
+        // repo filter, through the real tool: restricting to fossid-vscode
+        // must never return a lakitu (Rust) result for a lakitu-specific
+        // question — the deterministic version of the "in fossid-mcp
+        // specifically" phrasing hint that measurably failed to scope results.
+        let scoped = svc
+            .code_index_query(Parameters(CodeIndexQueryRequest {
+                query: "how does the reconcile loop decide a shared task's next state".to_string(),
+                expand_top_n: None,
+                repo: Some("fossid-ab/fossid-vscode".to_string()),
+            }))
+            .await
+            .expect("tool call should succeed with a repo filter");
+        let scoped_text = scoped.content[0].as_text().unwrap().text.clone();
+        assert!(
+            !scoped_text.contains("dac2k9/lakitu"),
+            "repo filter must exclude lakitu results when scoped to fossid-vscode, got: {scoped_text}"
+        );
+
+        // SAFETY: still inside the lock guard from above.
+        unsafe {
+            std::env::remove_var("LAKITU_CODE_INDEX_DIR");
+            std::env::remove_var("LAKITU_CODE_INDEX_MODEL_DIR");
+        }
+    }
+
+    // `oneshot`s the real router directly (no socket needed) — the standard
+    // axum testing pattern.
+    use tower::ServiceExt;
+
+    /// POSTs a code-index query to `code_index_router` with an explicit
+    /// `Host` header, returning the response status + body. The handler's own
+    /// responses are always JSON, but `host_guard`'s rejection (reused as-is
+    /// from `web.rs`) is plain text — so a parse failure falls back to the
+    /// raw text as a JSON string rather than panicking; callers that expect
+    /// JSON just index into it as usual.
+    async fn post_query_with_host(
+        shared: CodeIndexShared,
+        host: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/code-index/query")
+            .header("host", host)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = code_index_router(shared).oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned()));
+        (status, parsed)
+    }
+
+    /// Same, with a legitimate loopback `Host` — what a real browser hitting
+    /// the daemon on `127.0.0.1` sends.
+    async fn post_query(
+        shared: CodeIndexShared,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        post_query_with_host(shared, "127.0.0.1", body).await
+    }
+
+    /// The security-relevant new behavior in this endpoint isn't the query
+    /// logic (already covered by `code_index_query_tool_returns_relevant_spans`
+    /// against the same underlying `code_index_query_core`) — it's that the
+    /// router is actually wired to reject non-loopback `Host`s, same as
+    /// `web::router()`. Needs no real artifact: host_guard runs before the
+    /// handler ever touches the index.
+    #[tokio::test]
+    async fn code_index_router_rejects_bad_host_and_reports_not_configured() {
+        let _env = CODE_INDEX_ENV_LOCK.lock().await;
+        let empty = std::env::temp_dir().join("lakitu-code-index-router-test-empty-scratch");
+        // SAFETY: the lock above is held for this whole test.
+        unsafe {
+            std::env::set_var("LAKITU_CODE_INDEX_DIR", &empty);
+            std::env::remove_var("LAKITU_CODE_INDEX_MODEL_DIR");
+        }
+        let shared: CodeIndexShared = Arc::new(Mutex::new(None));
+
+        let (status, body) = post_query_with_host(
+            shared.clone(),
+            "evil.example.com",
+            serde_json::json!({ "query": "anything" }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "a spoofed non-loopback Host must be rejected by host_guard"
+        );
+        assert!(
+            body.as_str().is_some_and(|s| s.contains("loopback-only")),
+            "the 403 must be host_guard's own rejection text, not some other source, got: {body}"
+        );
+
+        let (status, body) = post_query(shared, serde_json::json!({ "query": "anything" })).await;
+        // SAFETY: still inside the lock guard from above.
+        unsafe {
+            std::env::remove_var("LAKITU_CODE_INDEX_DIR");
+        }
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let msg = body["error"]
+            .as_str()
+            .expect("error field must be a string");
+        assert!(
+            msg.contains("not available") && msg.contains(empty.to_str().unwrap()),
+            "expected a clear not-configured message naming the missing path, got: {msg}"
+        );
+    }
+
+    /// The JSON-endpoint counterpart to `code_index_query_tool_returns_relevant_spans`
+    /// — same real queries, same assertions, through the HTTP/JSON surface
+    /// instead of the MCP-formatted-text one, proving the new (de)serialization
+    /// and router wiring reproduce the already-validated behavior exactly.
+    /// Skipped unless `LAKITU_TEST_ARTIFACT`/`LAKITU_TEST_MODELS` are set.
+    #[tokio::test]
+    async fn code_index_router_returns_json_spans_for_real_query() {
+        let (Ok(art_dir), Ok(models_dir)) = (
+            std::env::var("LAKITU_TEST_ARTIFACT"),
+            std::env::var("LAKITU_TEST_MODELS"),
+        ) else {
+            eprintln!(
+                "skip: set LAKITU_TEST_ARTIFACT + LAKITU_TEST_MODELS to test the live REST endpoint"
+            );
+            return;
+        };
+        let _env = CODE_INDEX_ENV_LOCK.lock().await;
+        // SAFETY: held for this whole test.
+        unsafe {
+            std::env::set_var("LAKITU_CODE_INDEX_DIR", &art_dir);
+            std::env::set_var("LAKITU_CODE_INDEX_MODEL_DIR", &models_dir);
+        }
+        let shared: CodeIndexShared = Arc::new(Mutex::new(None));
+
+        let (status, body) = post_query(
+            shared.clone(),
+            serde_json::json!({
+                "query": "how does the reconcile loop decide a shared task's next state"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["low_confidence"], false);
+        let spans = body["spans"].as_array().expect("spans must be an array");
+        assert!(
+            spans.iter().any(|s| {
+                let sym = s["symbol"].as_str().unwrap_or_default();
+                sym.contains("reconciled_to") || sym.contains("reconcile_advance")
+            }),
+            "expected a relevant symbol in the JSON spans, got: {body}"
+        );
+        assert!(
+            spans.iter().any(|s| s["score"].is_number()),
+            "a real hit must carry a numeric cosine score, got: {body}"
+        );
+
+        let (_, junk_body) = post_query(
+            shared.clone(),
+            serde_json::json!({ "query": "what's a good recipe for pasta carbonara" }),
+        )
+        .await;
+        assert_eq!(
+            junk_body["low_confidence"], true,
+            "an out-of-domain query must trip low_confidence in the JSON body too, got: {junk_body}"
+        );
+
+        let (_, scoped_body) = post_query(
+            shared,
+            serde_json::json!({
+                "query": "how does the reconcile loop decide a shared task's next state",
+                "repo": "fossid-ab/fossid-vscode",
+            }),
+        )
+        .await;
+        let scoped_spans = scoped_body["spans"]
+            .as_array()
+            .expect("spans must be an array");
+        assert!(
+            scoped_spans
+                .iter()
+                .all(|s| s["repo"].as_str() != Some("dac2k9/lakitu")),
+            "repo filter must exclude lakitu results when scoped to fossid-vscode, got: {scoped_body}"
+        );
+
+        // SAFETY: still inside the lock guard from above.
+        unsafe {
+            std::env::remove_var("LAKITU_CODE_INDEX_DIR");
+            std::env::remove_var("LAKITU_CODE_INDEX_MODEL_DIR");
+        }
     }
 }

@@ -32,12 +32,21 @@ use crate::server::AgentBoardService;
 /// interface (tailscale / reverse proxy), don't bind `0.0.0.0` directly.
 const DEFAULT_LISTEN: &str = "127.0.0.1:8787";
 
-/// Run the coordination daemon: MCP-over-HTTP at `/mcp`, bearer-gated.
-pub async fn serve() -> Result<()> {
-    let listen = std::env::var("LAKITU_FLEET_LISTEN")
+/// This daemon's own bind address, resolved the same way `serve()` binds it.
+/// For any in-process handler that needs to reach another route on this same
+/// daemon (e.g. a web-cockpit handler self-POSTing `/code-index/query` rather
+/// than importing the query logic directly) — read this instead of
+/// hardcoding a port, so it can never drift from the real bind.
+pub(crate) fn bound_address() -> String {
+    std::env::var("LAKITU_FLEET_LISTEN")
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_LISTEN.to_string());
+        .unwrap_or_else(|| DEFAULT_LISTEN.to_string())
+}
+
+/// Run the coordination daemon: MCP-over-HTTP at `/mcp`, bearer-gated.
+pub async fn serve() -> Result<()> {
+    let listen = bound_address();
 
     // Fail fast if launched without a token — the daemon must never run open.
     let token = std::env::var("LAKITU_FLEET_TOKEN")
@@ -52,6 +61,7 @@ pub async fn serve() -> Result<()> {
     // ID cache (Arc<RwLock<…>>) is shared across all HTTP sessions instead of
     // starting cold on every connection.
     let shared = AgentBoardService::new();
+    let code_index = shared.code_index_handle();
     let ct = CancellationToken::new();
 
     let mcp = StreamableHttpService::new(
@@ -77,14 +87,22 @@ pub async fn serve() -> Result<()> {
     // off-box. We therefore mount it OUTSIDE the bearer layer, and ONLY on a
     // loopback bind; on any non-loopback bind it stays disabled (front it with a
     // TLS-terminating proxy, or use the TUI). Keep this guard if you add web
-    // routes — it is the entire basis for skipping auth there.
+    // routes — it is the entire basis for skipping auth there. The code-index
+    // query endpoint (`/code-index/query`) shares this exact posture for the
+    // same reason (no token on the browser side) even though it triggers live
+    // compute rather than just rendering a snapshot — see
+    // `server::code_index_router`'s doc comment.
     let loopback = listen
         .parse::<std::net::SocketAddr>()
         .map(|a| a.ip().is_loopback())
         .unwrap_or(false);
     let app = if loopback {
-        tracing::info!("web cockpit at / (loopback, read-only, unauthenticated mirror)");
-        gated.merge(crate::web::router())
+        tracing::info!(
+            "web cockpit at / + code-index query at /code-index/query (loopback, unauthenticated)"
+        );
+        gated
+            .merge(crate::web::router())
+            .merge(crate::server::code_index_router(code_index))
     } else {
         tracing::warn!(
             %listen,
