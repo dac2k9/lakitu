@@ -12,7 +12,9 @@
 //! once the artifact ships.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
+use ndarray::Array2;
 use serde::Deserialize;
 
 /// 1-hop edges of a record. Targets are record **ids** (O(1) resolve), split by
@@ -127,6 +129,118 @@ pub fn expand(
     out
 }
 
+/// The index `manifest.json`: embedder + model/tokenizer paths (relative to the
+/// artifact dir), dims/pooling for the embed guard, per-repo source SHAs, and
+/// `by_symbol` (canonical `repo:path:symbol` → its window-chunk record ids, for
+/// resolving an oversized symbol's full span).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Manifest {
+    pub embedder: String,
+    pub onnx: String,
+    pub tokenizer: String,
+    pub dim: usize,
+    pub pooling: String,
+    pub max_len: usize,
+    pub records: usize,
+    pub repos: BTreeMap<String, String>,
+    #[serde(default)]
+    pub by_symbol: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub edges_method: String,
+}
+
+/// A loaded index: records + row-aligned jina vectors + manifest + an id→row
+/// map. Vectors are raw (masked-mean, NOT unit-normalized — golden l2 ≈ 14.4),
+/// so we keep per-row norms for cosine.
+pub struct Artifact {
+    pub records: Vec<Record>,
+    pub vectors: Array2<f32>,
+    pub norms: Vec<f32>,
+    pub manifest: Manifest,
+    pub by_id: BTreeMap<String, usize>,
+}
+
+impl Artifact {
+    /// Load from a directory holding `records.jsonl` + `vectors.npy` +
+    /// `manifest.json`. Guards row/dim alignment against the manifest.
+    pub fn load(dir: &Path) -> anyhow::Result<Self> {
+        let manifest: Manifest =
+            serde_json::from_reader(std::fs::File::open(dir.join("manifest.json"))?)?;
+
+        let recs_txt = std::fs::read_to_string(dir.join("records.jsonl"))?;
+        let mut records = Vec::with_capacity(manifest.records);
+        for line in recs_txt.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            records.push(serde_json::from_str::<Record>(line)?);
+        }
+
+        let vectors: Array2<f32> = ndarray_npy::read_npy(dir.join("vectors.npy"))?;
+        anyhow::ensure!(
+            records.len() == vectors.nrows(),
+            "records ({}) != vector rows ({})",
+            records.len(),
+            vectors.nrows()
+        );
+        anyhow::ensure!(
+            vectors.ncols() == manifest.dim,
+            "vector dim {} != manifest dim {}",
+            vectors.ncols(),
+            manifest.dim
+        );
+
+        let norms = vectors
+            .rows()
+            .into_iter()
+            .map(|r| r.dot(&r).sqrt())
+            .collect();
+        // Record ids are NOT globally unique — cfg-duplicated (e.g. a
+        // `#[cfg(unix)]` / `#[cfg(windows)]` pair) or windowed symbols share a
+        // canonical `repo:path:symbol`. Keep the first occurrence; resolving a
+        // hit/edge to ALL of a symbol's records (via `manifest.by_symbol`) is a
+        // follow-up.
+        let mut by_id: BTreeMap<String, usize> = BTreeMap::new();
+        for (i, r) in records.iter().enumerate() {
+            by_id.entry(r.id.clone()).or_insert(i);
+        }
+        Ok(Self {
+            records,
+            vectors,
+            norms,
+            manifest,
+            by_id,
+        })
+    }
+
+    /// Top-`k` record ids by cosine similarity to a raw jina query vector.
+    pub fn search(&self, query: &[f32], k: usize) -> Vec<String> {
+        let q = ndarray::ArrayView1::from(query);
+        let qn = q.dot(&q).sqrt();
+        let mut scored: Vec<(f32, usize)> = self
+            .vectors
+            .rows()
+            .into_iter()
+            .enumerate()
+            .map(|(i, row)| {
+                let denom = self.norms[i] * qn;
+                let cos = if denom > 0.0 {
+                    row.dot(&q) / denom
+                } else {
+                    0.0
+                };
+                (cos, i)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored
+            .into_iter()
+            .take(k)
+            .map(|(_, i)| self.records[i].id.clone())
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +327,31 @@ mod tests {
         let out = expand(&records, &by, &["a".to_string()], 15, 5, 2);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].symbol, "a");
+    }
+
+    /// Integration test against the real artifact — skipped unless
+    /// `LAKITU_TEST_ARTIFACT` points at a built artifact dir (so CI / other
+    /// machines don't fail). Validates load + row-alignment + cosine via
+    /// self-retrieval (a record's own vector must rank itself top-1).
+    #[test]
+    fn loads_real_artifact_when_present() {
+        let Ok(dir) = std::env::var("LAKITU_TEST_ARTIFACT") else {
+            eprintln!("skip: set LAKITU_TEST_ARTIFACT to a built artifact dir");
+            return;
+        };
+        let art = Artifact::load(Path::new(&dir)).expect("load artifact");
+        assert_eq!(art.records.len(), art.manifest.records);
+        assert_eq!(art.vectors.ncols(), art.manifest.dim);
+        // ids aren't globally unique (cfg-dup / windowed symbols share a
+        // canonical id), so by_id may hold fewer entries than records.
+        assert!(art.by_id.len() <= art.records.len());
+
+        let probe = art.records.len() / 2;
+        let qv: Vec<f32> = art.vectors.row(probe).to_vec();
+        let top = art.search(&qv, 1);
+        assert_eq!(
+            top[0], art.records[probe].id,
+            "a vector must retrieve itself"
+        );
     }
 }
