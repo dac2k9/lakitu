@@ -1981,10 +1981,12 @@ impl AgentBoardService {
         ask a plain-English question about an indexed codebase and get back the matching code \
         SPANS (never a whole file) plus their real 1-hop call/type-graph neighbors — measured \
         ~95% cheaper than reading the whole file(s) with the same answer, across a real 40-query \
-        eval. PROTOTYPE SCOPE: covers fossid-mcp, fossid-vscode, and dac2k9/lakitu only, from a \
-        hand-built snapshot (not auto-updated on merge yet) — results can be stale or incomplete; \
-        treat a hit as a strong lead, not ground truth. Returns a clear message (not an error) if \
-        this daemon has no index configured."
+        eval. Each span carries its cosine score (None on an expanded neighbor, which wasn't \
+        retrieved by similarity); a leading ⚠ means the top score was too low to trust — verify \
+        before using those. PROTOTYPE SCOPE: covers fossid-mcp, fossid-vscode, and dac2k9/lakitu \
+        only, from a hand-built snapshot (not auto-updated on merge yet) — even a confident hit \
+        can be stale; treat it as a strong lead, not ground truth. Returns a clear message (not \
+        an error) if this daemon has no index configured."
     )]
     async fn code_index_query(
         &self,
@@ -2016,11 +2018,18 @@ impl AgentBoardService {
             &mut state.embedder,
             &req.query,
             opts,
+            req.repo.as_deref(),
             &BTreeMap::new(),
         )
         .map_err(mcp)?;
 
         let mut out = String::new();
+        if result.low_confidence {
+            out.push_str(
+                "⚠ no strong match — the results below scored low; they may be the closest \
+                 available rather than a real answer. Verify before trusting.\n",
+            );
+        }
         for w in &result.staleness_warnings {
             out.push_str(&format!("⚠ {w}\n"));
         }
@@ -2028,9 +2037,14 @@ impl AgentBoardService {
             out.push_str("(no matches)\n");
         }
         for s in &result.spans {
+            let score = s
+                .score
+                .map(|v| format!(" score={v:.2}"))
+                .unwrap_or_default();
             out.push_str(&format!(
-                "\n[{}] {} {}::{} L{}-{}\n```\n{}\n```\n",
+                "\n[{}{}] {} {}::{} L{}-{}\n```\n{}\n```\n",
                 if s.hit { "hit" } else { "exp" },
+                score,
                 s.repo,
                 s.path,
                 s.symbol,
@@ -2755,6 +2769,11 @@ pub struct CodeIndexQueryRequest {
     )]
     #[serde(default)]
     pub expand_top_n: Option<usize>,
+    #[schemars(
+        description = "Optional: restrict results to one repo (e.g. \"fossid-ab/fossid-mcp\"). Phrasing the repo INTO the query text (e.g. \"in fossid-mcp, how does...\") does NOT reliably scope results — measured cross-repo bleed even with that hint. Use this param instead when the repo is known."
+    )]
+    #[serde(default)]
+    pub repo: Option<String>,
 }
 
 /// Declared agent state. Lowercase on the wire to match the heartbeat
@@ -3612,6 +3631,7 @@ https://github.com/acme/web/pull/123
             .code_index_query(Parameters(CodeIndexQueryRequest {
                 query: "anything".to_string(),
                 expand_top_n: None,
+                repo: None,
             }))
             .await
             .expect("tool call itself should not error");
@@ -3646,18 +3666,64 @@ https://github.com/acme/web/pull/123
             .code_index_query(Parameters(CodeIndexQueryRequest {
                 query: "how does the reconcile loop decide a shared task's next state".to_string(),
                 expand_top_n: None,
+                repo: None,
             }))
             .await
             .expect("tool call should succeed with a configured index");
         let text = result.content[0].as_text().unwrap().text.clone();
+        assert!(
+            text.contains("reconciled_to") || text.contains("reconcile_advance"),
+            "expected a relevant symbol in the tool output, got: {text}"
+        );
+        assert!(
+            text.contains("score="),
+            "a real hit must render its cosine score, got: {text}"
+        );
+        assert!(
+            !text.starts_with('⚠'),
+            "a genuinely relevant query must not trip the low-confidence warning, got: {text}"
+        );
+
+        // The out-of-domain stress case: no correct answer exists anywhere in
+        // the index. This is exactly what low_confidence exists to flag —
+        // without it, this response is indistinguishable in shape from the
+        // real hit above.
+        let junk = svc
+            .code_index_query(Parameters(CodeIndexQueryRequest {
+                query: "what's a good recipe for pasta carbonara".to_string(),
+                expand_top_n: None,
+                repo: None,
+            }))
+            .await
+            .expect("tool call itself should not error even on a nonsense query");
+        let junk_text = junk.content[0].as_text().unwrap().text.clone();
+        assert!(
+            junk_text.starts_with('⚠'),
+            "an out-of-domain query must trip the low-confidence warning, got: {junk_text}"
+        );
+
+        // repo filter, through the real tool: restricting to fossid-vscode
+        // must never return a lakitu (Rust) result for a lakitu-specific
+        // question — the deterministic version of the "in fossid-mcp
+        // specifically" phrasing hint that measurably failed to scope results.
+        let scoped = svc
+            .code_index_query(Parameters(CodeIndexQueryRequest {
+                query: "how does the reconcile loop decide a shared task's next state".to_string(),
+                expand_top_n: None,
+                repo: Some("fossid-ab/fossid-vscode".to_string()),
+            }))
+            .await
+            .expect("tool call should succeed with a repo filter");
+        let scoped_text = scoped.content[0].as_text().unwrap().text.clone();
+        assert!(
+            !scoped_text.contains("dac2k9/lakitu"),
+            "repo filter must exclude lakitu results when scoped to fossid-vscode, got: {scoped_text}"
+        );
+
         // SAFETY: still inside the lock guard from above.
         unsafe {
             std::env::remove_var("LAKITU_CODE_INDEX_DIR");
             std::env::remove_var("LAKITU_CODE_INDEX_MODEL_DIR");
         }
-        assert!(
-            text.contains("reconciled_to") || text.contains("reconcile_advance"),
-            "expected a relevant symbol in the tool output, got: {text}"
-        );
     }
 }

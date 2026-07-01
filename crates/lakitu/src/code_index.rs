@@ -48,7 +48,7 @@ pub struct Record {
 }
 
 /// A span returned to the caller — a hit or an expanded neighbor, never a file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Span {
     pub repo: String,
     pub path: String,
@@ -59,9 +59,13 @@ pub struct Span {
     pub body: String,
     /// `true` = a direct retrieval hit; `false` = pulled in by graph-expand.
     pub hit: bool,
+    /// Cosine similarity to the query — `Some` for a hit, `None` for a
+    /// graph-expanded neighbor (it wasn't retrieved by similarity, so it has
+    /// no meaningful query-relevance score of its own).
+    pub score: Option<f32>,
 }
 
-fn span_of(r: &Record, hit: bool) -> Span {
+fn span_of(r: &Record, hit: bool, score: Option<f32>) -> Span {
     Span {
         repo: r.repo.clone(),
         path: r.path.clone(),
@@ -70,58 +74,103 @@ fn span_of(r: &Record, hit: bool) -> Span {
         header: r.header.clone(),
         body: r.body.clone(),
         hit,
+        score,
     }
 }
 
-/// Precise 1-hop graph-expand. Returns the ranked `hit_ids` as spans (hits
-/// first, in rank order), then the 1-hop neighbors (callees, then type-refs) of
-/// only the top `expand_top_n` hits, deduped. Three knobs hold the token budget
-/// that keeps the index net-positive — the measured lever that turns a
-/// *marginal* net-positive into a clean one:
+/// Below this cosine similarity, a "hit" is more likely noise than a real
+/// match — the starkest demo was a totally out-of-domain query (no relevant
+/// code exists at all) still returning a full top-5, formatted identically to
+/// a genuine answer.
+///
+/// STILL PROVISIONAL, from exactly 2 real data points, not a real
+/// distribution: an on-target query scored 0.62-0.66; a totally
+/// out-of-domain one ("pasta carbonara") scored 0.456-0.464 — a real but
+/// narrower gap than an initial guess assumed (an earlier 0.30 failed to flag
+/// the pasta-carbonara case at all). 0.48 sits between them with margin
+/// either way, but the true population spread of correct-match scores is
+/// unknown from 2 points — the Gate-1 recall harness measured a *mean*
+/// correct-match score of 0.605 across 40 real queries, meaning some correct
+/// matches surely score lower than that, and this threshold could be
+/// clipping them into false "low confidence" warnings. Needs a proper
+/// percentile-based calibration (e.g. the 5th percentile of true-positive
+/// scores against a batch of deliberately-nonsense queries) — tracked as a
+/// follow-up, not guessed further here.
+pub const LOW_CONFIDENCE_THRESHOLD: f32 = 0.48;
+
+/// A graph-expand candidate this short is almost always a generic one-liner
+/// (a getter, a trivial formatter) — a real edge, but noise rather than
+/// context when pulled into an unrelated question. Skipping it spends the
+/// neighbor cap on symbols substantial enough to matter. A heuristic, not a
+/// precise classifier: body length is a proxy for "trivial," not the thing
+/// itself.
+const TRIVIAL_NEIGHBOR_MAX_BODY_LEN: usize = 120;
+
+/// Precise 1-hop graph-expand. Returns the ranked `hits` as spans (in rank
+/// order, each carrying its cosine score), then the 1-hop neighbors (callees,
+/// then type-refs) of only the top `expand_top_n` hits, deduped and filtered
+/// to substantial symbols. Three knobs hold the token budget that keeps the
+/// index net-positive — the measured lever that turns a *marginal*
+/// net-positive into a clean one:
 /// * `expand_top_n` — expand neighbors of only the top-N primary hits, not all
 ///   (the Gate-1 pre-check: expanding all hits gave ~23 spans; the top-1/2 is
 ///   what shrinks that toward the ~5–15 budget).
 /// * `per_hit_neighbor_cap` — bound each edge-kind per expanded hit.
 /// * `max_spans` — hard cap on the total returned.
 ///
-/// Edge ids that don't resolve in `by_id` are skipped (internal-only).
+/// Edge ids that don't resolve in `by_id` are skipped (internal-only), as are
+/// ones resolving to a trivially short symbol (see
+/// `TRIVIAL_NEIGHBOR_MAX_BODY_LEN`) — real edges, but noise rather than
+/// context most of the time.
 pub fn expand(
     records: &[Record],
     by_id: &BTreeMap<String, usize>,
-    hit_ids: &[String],
+    hits: &[(String, f32)],
     max_spans: usize,
     per_hit_neighbor_cap: usize,
     expand_top_n: usize,
 ) -> Vec<Span> {
     let mut out: Vec<Span> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
+    let is_substantial = |nid: &str| {
+        by_id
+            .get(nid)
+            .is_some_and(|&i| records[i].body.len() > TRIVIAL_NEIGHBOR_MAX_BODY_LEN)
+    };
 
-    // Every hit is returned, in rank order.
-    for id in hit_ids {
+    // Every hit is returned, in rank order, with its real cosine score.
+    for (id, score) in hits {
         if let Some(&idx) = by_id.get(id) {
             if seen.insert(id.clone()) {
-                out.push(span_of(&records[idx], true));
+                out.push(span_of(&records[idx], true, Some(*score)));
             }
         }
     }
 
     // Only the top-N hits get their 1-hop neighbors (callees, then type-refs)
-    // pulled — capped per hit — which is what holds the span budget.
-    'hits: for id in hit_ids.iter().take(expand_top_n) {
+    // pulled — capped per hit, filtered to substantial symbols — which is
+    // what holds the span budget AND the signal-to-noise ratio.
+    'hits: for (id, _) in hits.iter().take(expand_top_n) {
         let Some(&idx) = by_id.get(id) else { continue };
         let e = &records[idx].edges;
         let neighbors = e
             .callees
             .iter()
+            .filter(|nid| is_substantial(nid))
             .take(per_hit_neighbor_cap)
-            .chain(e.type_refs.iter().take(per_hit_neighbor_cap));
+            .chain(
+                e.type_refs
+                    .iter()
+                    .filter(|nid| is_substantial(nid))
+                    .take(per_hit_neighbor_cap),
+            );
         for nid in neighbors {
             if out.len() >= max_spans {
                 break 'hits;
             }
             if let Some(&nidx) = by_id.get(nid) {
                 if seen.insert(nid.clone()) {
-                    out.push(span_of(&records[nidx], false));
+                    out.push(span_of(&records[nidx], false, None));
                 }
             }
         }
@@ -214,8 +263,11 @@ impl Artifact {
         })
     }
 
-    /// Top-`k` record ids by cosine similarity to a raw jina query vector.
-    pub fn search(&self, query: &[f32], k: usize) -> Vec<String> {
+    /// Top-`k` (record id, cosine score) pairs for a raw jina query vector,
+    /// most similar first. `repo_filter`, if given, restricts candidates to
+    /// that repo (e.g. a caller-supplied hint didn't reliably steer results
+    /// by phrasing alone — this is the real, deterministic version of that).
+    pub fn search(&self, query: &[f32], k: usize, repo_filter: Option<&str>) -> Vec<(String, f32)> {
         let q = ndarray::ArrayView1::from(query);
         let qn = q.dot(&q).sqrt();
         let mut scored: Vec<(f32, usize)> = self
@@ -223,6 +275,7 @@ impl Artifact {
             .rows()
             .into_iter()
             .enumerate()
+            .filter(|(i, _)| repo_filter.is_none_or(|want| self.records[*i].repo == want))
             .map(|(i, row)| {
                 let denom = self.norms[i] * qn;
                 let cos = if denom > 0.0 {
@@ -237,7 +290,7 @@ impl Artifact {
         scored
             .into_iter()
             .take(k)
-            .map(|(_, i)| self.records[i].id.clone())
+            .map(|(score, i)| (self.records[i].id.clone(), score))
             .collect()
     }
 }
@@ -349,6 +402,12 @@ impl Embedder {
 pub struct QueryResult {
     pub spans: Vec<Span>,
     pub staleness_warnings: Vec<String>,
+    /// `true` when the top hit's score is below [`LOW_CONFIDENCE_THRESHOLD`]
+    /// — none of `spans` is likely a real match, not just a weak one. The
+    /// starkest case: a query with no correct answer anywhere in the index
+    /// still returns a full top-k, indistinguishable in shape from a genuine
+    /// hit unless this flag is checked.
+    pub low_confidence: bool,
 }
 
 /// Tunable knobs for [`query`] — the levers the Gate-1 net-positive check
@@ -377,24 +436,29 @@ impl Default for QueryOpts {
 }
 
 /// The full pipeline an MCP query tool would call: embed the NL query in the
-/// index's own vector space, retrieve top-k, precisely expand the top hits'
-/// 1-hop graph neighbors (capped per `opts`), and flag any result whose repo
-/// has drifted past its pinned index SHA. `current_shas` (repo → current
-/// HEAD) is caller-supplied — this module has no opinion on where a repo's
-/// checkout lives on disk.
+/// index's own vector space, retrieve top-k (optionally restricted to
+/// `repo_filter`), precisely expand the top hits' 1-hop graph neighbors
+/// (capped per `opts`), and flag any result whose repo has drifted past its
+/// pinned index SHA. `current_shas` (repo → current HEAD) is caller-supplied
+/// — this module has no opinion on where a repo's checkout lives on disk.
 pub fn query(
     artifact: &Artifact,
     embedder: &mut Embedder,
     text: &str,
     opts: QueryOpts,
+    repo_filter: Option<&str>,
     current_shas: &BTreeMap<String, String>,
 ) -> anyhow::Result<QueryResult> {
     let qv = embedder.embed(text)?;
-    let hit_ids = artifact.search(&qv, opts.k);
+    let hits = artifact.search(&qv, opts.k, repo_filter);
+    let low_confidence = hits
+        .first()
+        .map(|(_, score)| *score < LOW_CONFIDENCE_THRESHOLD)
+        .unwrap_or(true); // no hits at all (e.g. an empty/over-filtered index) is its own low-confidence case
     let spans = expand(
         &artifact.records,
         &artifact.by_id,
-        &hit_ids,
+        &hits,
         opts.max_spans,
         opts.per_hit_neighbor_cap,
         opts.expand_top_n,
@@ -414,6 +478,7 @@ pub fn query(
     Ok(QueryResult {
         spans,
         staleness_warnings,
+        low_confidence,
     })
 }
 
@@ -421,6 +486,9 @@ pub fn query(
 mod tests {
     use super::*;
 
+    /// Body is padded well past `TRIVIAL_NEIGHBOR_MAX_BODY_LEN` so these
+    /// structural tests exercise edge traversal/capping/dedup, not the
+    /// trivial-neighbor filter (which has its own dedicated test below).
     fn rec(id: &str, callees: &[&str], type_refs: &[&str]) -> Record {
         Record {
             id: id.to_string(),
@@ -430,7 +498,11 @@ mod tests {
             kind: "fn".to_string(),
             line_span: [1, 9],
             header: format!("fn {id}()"),
-            body: format!("fn {id}() {{ /* ... */ }}"),
+            // Padded well past TRIVIAL_NEIGHBOR_MAX_BODY_LEN (120) regardless
+            // of how short `id` is — verified in trivial_neighbor_filter_threshold_sanity.
+            body: format!(
+                "fn {id}() {{\n    // padding so this test record isn't filtered as a trivial\n    // neighbor by the expand-noise heuristic — needs to clear 120 chars.\n    do_the_thing();\n}}"
+            ),
             edges: Edges {
                 callees: callees.iter().map(|s| s.to_string()).collect(),
                 type_refs: type_refs.iter().map(|s| s.to_string()).collect(),
@@ -446,6 +518,27 @@ mod tests {
             .collect()
     }
 
+    fn hit(id: &str, score: f32) -> (String, f32) {
+        (id.to_string(), score)
+    }
+
+    /// Guards the assumption every other structural test relies on: `rec()`'s
+    /// body clears the trivial-neighbor filter with margin. Shortening the
+    /// padding (or raising the threshold) would silently zero out every
+    /// expand test's neighbors — this turns that into one clear failure
+    /// here instead of four confusing ones elsewhere.
+    #[test]
+    fn rec_helper_body_clears_trivial_threshold() {
+        let r = rec("x", &[], &[]);
+        assert!(
+            r.body.len() > TRIVIAL_NEIGHBOR_MAX_BODY_LEN + 20,
+            "rec()'s body ({} chars) must clear TRIVIAL_NEIGHBOR_MAX_BODY_LEN \
+             ({TRIVIAL_NEIGHBOR_MAX_BODY_LEN}) with margin, or every expand test's \
+             neighbors get silently filtered",
+            r.body.len()
+        );
+    }
+
     #[test]
     fn hits_first_then_neighbors_deduped() {
         let records = vec![
@@ -455,10 +548,19 @@ mod tests {
             rec("z", &[], &[]),
         ];
         let by = index(&records);
-        let out = expand(&records, &by, &["a".to_string()], 15, 5, 2);
+        let out = expand(&records, &by, &[hit("a", 0.9)], 15, 5, 2);
         let ids: Vec<_> = out.iter().map(|s| s.symbol.as_str()).collect();
         assert_eq!(ids, ["a", "b", "t"]); // hit, then its callee + type-ref; z untouched
         assert!(out[0].hit && !out[1].hit && !out[2].hit);
+        assert_eq!(
+            out[0].score,
+            Some(0.9),
+            "a hit carries its real cosine score"
+        );
+        assert_eq!(
+            out[1].score, None,
+            "an expanded neighbor has no query-relevance score"
+        );
     }
 
     #[test]
@@ -474,7 +576,7 @@ mod tests {
         ];
         let by = index(&records);
         // per-hit cap 2 → ≤2 callees + ≤2 type-refs; max_spans 4 → hit + 3 neighbors.
-        let out = expand(&records, &by, &["h".to_string()], 4, 2, 2);
+        let out = expand(&records, &by, &[hit("h", 0.9)], 4, 2, 2);
         let ids: Vec<_> = out.iter().map(|s| s.symbol.as_str()).collect();
         assert_eq!(ids, ["h", "c1", "c2", "r1"]); // c3/c4 capped out; r2 cut by max_spans
     }
@@ -489,7 +591,7 @@ mod tests {
         ];
         let by = index(&records);
         // Two hits; expand_top_n=1 → only the top hit (a) expands → x in, y out.
-        let out = expand(&records, &by, &["a".to_string(), "b".to_string()], 15, 5, 1);
+        let out = expand(&records, &by, &[hit("a", 0.9), hit("b", 0.8)], 15, 5, 1);
         let ids: Vec<_> = out.iter().map(|s| s.symbol.as_str()).collect();
         assert_eq!(ids, ["a", "b", "x"]); // both hits returned; only top-1 expanded
         assert!(out[0].hit && out[1].hit && !out[2].hit);
@@ -500,9 +602,31 @@ mod tests {
         // Edges to external/missing ids (no record) must not appear (internal-only).
         let records = vec![rec("a", &["std::vec::Vec", "missing"], &["External"])];
         let by = index(&records);
-        let out = expand(&records, &by, &["a".to_string()], 15, 5, 2);
+        let out = expand(&records, &by, &[hit("a", 0.9)], 15, 5, 2);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].symbol, "a");
+    }
+
+    #[test]
+    fn trivial_neighbors_are_filtered_from_expand() {
+        let mut records = vec![rec("a", &["short", "long"], &[])];
+        let mut short = rec("short", &[], &[]);
+        short.body = "fn short() {}".to_string(); // well under the trivial threshold
+        let long = records[0].clone(); // rec()'s default body is padded, well over it
+        let mut long = long;
+        long.id = "long".to_string();
+        long.symbol = "long".to_string();
+        long.edges = Edges::default();
+        records.push(short);
+        records.push(long);
+        let by = index(&records);
+        let out = expand(&records, &by, &[hit("a", 0.9)], 15, 5, 1);
+        let ids: Vec<_> = out.iter().map(|s| s.symbol.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["a", "long"],
+            "the trivial 'short' neighbor must be skipped"
+        );
     }
 
     /// Integration test against the real artifact — skipped unless
@@ -524,11 +648,38 @@ mod tests {
 
         let probe = art.records.len() / 2;
         let qv: Vec<f32> = art.vectors.row(probe).to_vec();
-        let top = art.search(&qv, 1);
+        let top = art.search(&qv, 1, None);
         assert_eq!(
-            top[0], art.records[probe].id,
+            top[0].0, art.records[probe].id,
             "a vector must retrieve itself"
         );
+        assert!(
+            top[0].1 > 0.999,
+            "a vector's cosine to itself must be ~1.0, got {}",
+            top[0].1
+        );
+
+        // repo_filter: restricting to a repo that isn't this record's must
+        // never return it — the deterministic disambiguation the "in X
+        // specifically" phrasing hint failed to provide.
+        let other_repo = art
+            .records
+            .iter()
+            .find(|r| r.repo != art.records[probe].repo)
+            .map(|r| r.repo.clone());
+        if let Some(other_repo) = other_repo {
+            let filtered = art.search(&qv, 5, Some(&other_repo));
+            assert!(
+                filtered
+                    .iter()
+                    .all(|(id, _)| by_id_repo(&art, id) == other_repo),
+                "repo_filter must exclude every other repo's records"
+            );
+        }
+    }
+
+    fn by_id_repo(art: &Artifact, id: &str) -> String {
+        art.records[art.by_id[id]].repo.clone()
     }
 
     #[derive(Deserialize)]
@@ -596,15 +747,27 @@ mod tests {
         .expect("load embedder");
 
         let q = "how does the reconcile loop decide a shared task's next state";
-        let result =
-            query(&art, &mut emb, q, QueryOpts::default(), &BTreeMap::new()).expect("query");
+        let result = query(
+            &art,
+            &mut emb,
+            q,
+            QueryOpts::default(),
+            None,
+            &BTreeMap::new(),
+        )
+        .expect("query");
         assert!(!result.spans.is_empty(), "expected at least one span back");
+        assert!(
+            !result.low_confidence,
+            "a real, on-target query must not trip the low-confidence flag"
+        );
 
-        eprintln!("query: {q}");
+        eprintln!("query: {q}  low_confidence={}", result.low_confidence);
         for s in &result.spans {
             eprintln!(
-                "  [{}] {}:{} {} L{}-{}",
+                "  [{}] score={:.3?} {}:{} {} L{}-{}",
                 if s.hit { "hit" } else { "exp" },
+                s.score,
                 s.repo,
                 s.path,
                 s.symbol,
@@ -612,6 +775,24 @@ mod tests {
                 s.line_span[1]
             );
         }
+
+        // The out-of-domain stress case from the real evaluation: no correct
+        // answer exists anywhere in the index. This is the case
+        // low_confidence exists to catch.
+        let nonsense = "what's a good recipe for pasta carbonara";
+        let junk = query(
+            &art,
+            &mut emb,
+            nonsense,
+            QueryOpts::default(),
+            None,
+            &BTreeMap::new(),
+        )
+        .expect("query");
+        assert!(
+            junk.low_confidence,
+            "an out-of-domain query with no real answer in the index must trip low_confidence"
+        );
     }
 
     #[derive(Deserialize)]
@@ -685,8 +866,14 @@ mod tests {
         let mut ratio_sum = 0.0; // per-query mean, unweighted — a byte-heavy file
         let (mut ratio_min, mut ratio_max) = (f64::MAX, f64::MIN); // shouldn't dominate the story
         for q in &queries {
-            let Ok(result) = query(&art, &mut emb, q, QueryOpts::default(), &BTreeMap::new())
-            else {
+            let Ok(result) = query(
+                &art,
+                &mut emb,
+                q,
+                QueryOpts::default(),
+                None,
+                &BTreeMap::new(),
+            ) else {
                 continue;
             };
             if result.spans.is_empty() {
