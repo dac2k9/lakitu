@@ -25,7 +25,8 @@
 //! restart re-fetches. Stale-ID failure mode is loud (404 from `gh
 //! project item-edit`) rather than silent.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::sync::Arc;
 
 use rmcp::{
@@ -37,7 +38,7 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::fleet;
 use crate::persona;
@@ -255,10 +256,38 @@ struct Caches {
     board: HashMap<(String, u32), BoardCache>,
 }
 
+/// Lazily-loaded code-index artifact + embedder (the ~1s ONNX model load),
+/// shared across sessions like `caches` so it happens once, not per query.
+/// `None` until the first successful `code_index_query` call.
+struct CodeIndexState {
+    artifact: crate::code_index::Artifact,
+    embedder: crate::code_index::Embedder,
+}
+
+impl CodeIndexState {
+    /// `LAKITU_CODE_INDEX_DIR` (records.jsonl + vectors.npy + manifest.json)
+    /// and `LAKITU_CODE_INDEX_MODEL_DIR` (model.onnx + tokenizer.json). Unset
+    /// = not configured — the common case until the index has a settled
+    /// production home (today it's Gate-1's experimental 3-repo snapshot).
+    fn load() -> anyhow::Result<Self> {
+        let art_dir = std::env::var("LAKITU_CODE_INDEX_DIR")
+            .map_err(|_| anyhow::anyhow!("LAKITU_CODE_INDEX_DIR is not set"))?;
+        let model_dir = std::env::var("LAKITU_CODE_INDEX_MODEL_DIR")
+            .map_err(|_| anyhow::anyhow!("LAKITU_CODE_INDEX_MODEL_DIR is not set"))?;
+        let artifact = crate::code_index::Artifact::load(Path::new(&art_dir))?;
+        let embedder = crate::code_index::Embedder::load(
+            &Path::new(&model_dir).join("model.onnx"),
+            &Path::new(&model_dir).join("tokenizer.json"),
+        )?;
+        Ok(Self { artifact, embedder })
+    }
+}
+
 #[derive(Clone)]
 pub struct AgentBoardService {
     tool_router: ToolRouter<Self>,
     caches: Arc<RwLock<Caches>>,
+    code_index: Arc<Mutex<Option<CodeIndexState>>>,
 }
 
 impl Default for AgentBoardService {
@@ -273,6 +302,7 @@ impl AgentBoardService {
         Self {
             tool_router: Self::tool_router(),
             caches: Arc::new(RwLock::new(Caches::default())),
+            code_index: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1944,6 +1974,73 @@ impl AgentBoardService {
         let want = req.id.as_deref().map(fleet::sanitize);
         Ok(text(reconcile_shared_tasks(want).await.out))
     }
+
+    #[tool(
+        name = "code_index_query",
+        description = "Semantic search over the shared code index (the \"graph-brain\", 8205bd): \
+        ask a plain-English question about an indexed codebase and get back the matching code \
+        SPANS (never a whole file) plus their real 1-hop call/type-graph neighbors — measured \
+        ~95% cheaper than reading the whole file(s) with the same answer, across a real 40-query \
+        eval. PROTOTYPE SCOPE: covers fossid-mcp, fossid-vscode, and dac2k9/lakitu only, from a \
+        hand-built snapshot (not auto-updated on merge yet) — results can be stale or incomplete; \
+        treat a hit as a strong lead, not ground truth. Returns a clear message (not an error) if \
+        this daemon has no index configured."
+    )]
+    async fn code_index_query(
+        &self,
+        Parameters(req): Parameters<CodeIndexQueryRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut guard = self.code_index.lock().await;
+        if guard.is_none() {
+            match CodeIndexState::load() {
+                Ok(st) => *guard = Some(st),
+                Err(e) => {
+                    return Ok(text(format!(
+                        "code index not available on this daemon: {e} \
+                         (set LAKITU_CODE_INDEX_DIR + LAKITU_CODE_INDEX_MODEL_DIR to enable)"
+                    )));
+                }
+            }
+        }
+        let state = guard.as_mut().expect("just set or already Some above");
+
+        let opts = crate::code_index::QueryOpts {
+            expand_top_n: req.expand_top_n.unwrap_or(1),
+            ..Default::default()
+        };
+        // Staleness checking needs a repo -> local-checkout-path source (the
+        // registry only exposes that on disk, not through AgentSummary) — a
+        // fast-follow, not blocking this tool.
+        let result = crate::code_index::query(
+            &state.artifact,
+            &mut state.embedder,
+            &req.query,
+            opts,
+            &BTreeMap::new(),
+        )
+        .map_err(mcp)?;
+
+        let mut out = String::new();
+        for w in &result.staleness_warnings {
+            out.push_str(&format!("⚠ {w}\n"));
+        }
+        if result.spans.is_empty() {
+            out.push_str("(no matches)\n");
+        }
+        for s in &result.spans {
+            out.push_str(&format!(
+                "\n[{}] {} {}::{} L{}-{}\n```\n{}\n```\n",
+                if s.hit { "hit" } else { "exp" },
+                s.repo,
+                s.path,
+                s.symbol,
+                s.line_span[0],
+                s.line_span[1],
+                s.body
+            ));
+        }
+        Ok(text(out))
+    }
 }
 
 /// Counts + rendered text from one shared-task reconcile pass.
@@ -2645,6 +2742,19 @@ pub struct ListSharedTasksRequest {
     )]
     #[serde(default)]
     pub include_archived: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CodeIndexQueryRequest {
+    #[schemars(
+        description = "Plain-English question about the indexed codebase(s), e.g. \"how does X call Y\" or \"where is Z decided\" — embedded directly, no need to phrase it as search keywords."
+    )]
+    pub query: String,
+    #[schemars(
+        description = "How many of the top hits to graph-expand (pull in their real callers/callees), not just return standalone. Default 1 — cheapest, best for a direct \"where is X\" lookup. Raise to 2-3 for a cross-symbol \"how does X use Y\" question, where the answer likely needs a hit's neighbors too."
+    )]
+    #[serde(default)]
+    pub expand_top_n: Option<usize>,
 }
 
 /// Declared agent state. Lowercase on the wire to match the heartbeat
@@ -3478,6 +3588,76 @@ https://github.com/acme/web/pull/123
         assert!(
             verbose.contains("helps=\"a long capability blurb that costs tokens\""),
             "verbose includes the blurb"
+        );
+    }
+
+    /// Serializes the two `code_index_query` tests' env mutation across the
+    /// WHOLE test (set → the tool's `.await` → unset), so one test's write
+    /// can never land between the other's write and its subsequent read.
+    /// `std::sync::Mutex` (`fleet::TEST_ENV_LOCK`) can't be held across an
+    /// await safely (clippy::await_holding_lock) — a `tokio::sync::Mutex` can.
+    static CODE_INDEX_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+    #[tokio::test]
+    async fn code_index_query_reports_not_configured_when_env_unset() {
+        let _env = CODE_INDEX_ENV_LOCK.lock().await;
+        // SAFETY: the lock above is held for this whole test, so no other
+        // code_index_query test can mutate these two keys concurrently.
+        unsafe {
+            std::env::remove_var("LAKITU_CODE_INDEX_DIR");
+            std::env::remove_var("LAKITU_CODE_INDEX_MODEL_DIR");
+        }
+        let svc = AgentBoardService::new();
+        let result = svc
+            .code_index_query(Parameters(CodeIndexQueryRequest {
+                query: "anything".to_string(),
+                expand_top_n: None,
+            }))
+            .await
+            .expect("tool call itself should not error");
+        let text = result.content[0].as_text().unwrap().text.clone();
+        assert!(
+            text.contains("not available") && text.contains("LAKITU_CODE_INDEX_DIR"),
+            "expected a clear not-configured message, got: {text}"
+        );
+    }
+
+    /// Calls the actual registered MCP tool end-to-end against the real
+    /// artifact + model — not just the underlying `code_index` library, the
+    /// tool as a fleet agent would invoke it. Skipped unless
+    /// `LAKITU_TEST_ARTIFACT`/`LAKITU_TEST_MODELS` are set (see code_index.rs).
+    #[tokio::test]
+    async fn code_index_query_tool_returns_relevant_spans() {
+        let (Ok(art_dir), Ok(models_dir)) = (
+            std::env::var("LAKITU_TEST_ARTIFACT"),
+            std::env::var("LAKITU_TEST_MODELS"),
+        ) else {
+            eprintln!("skip: set LAKITU_TEST_ARTIFACT + LAKITU_TEST_MODELS to test the live tool");
+            return;
+        };
+        let _env = CODE_INDEX_ENV_LOCK.lock().await;
+        // SAFETY: see the sibling test above — held for this whole test.
+        unsafe {
+            std::env::set_var("LAKITU_CODE_INDEX_DIR", &art_dir);
+            std::env::set_var("LAKITU_CODE_INDEX_MODEL_DIR", &models_dir);
+        }
+        let svc = AgentBoardService::new();
+        let result = svc
+            .code_index_query(Parameters(CodeIndexQueryRequest {
+                query: "how does the reconcile loop decide a shared task's next state".to_string(),
+                expand_top_n: None,
+            }))
+            .await
+            .expect("tool call should succeed with a configured index");
+        let text = result.content[0].as_text().unwrap().text.clone();
+        // SAFETY: still inside the lock guard from above.
+        unsafe {
+            std::env::remove_var("LAKITU_CODE_INDEX_DIR");
+            std::env::remove_var("LAKITU_CODE_INDEX_MODEL_DIR");
+        }
+        assert!(
+            text.contains("reconciled_to") || text.contains("reconcile_advance"),
+            "expected a relevant symbol in the tool output, got: {text}"
         );
     }
 }
