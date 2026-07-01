@@ -83,20 +83,23 @@ fn span_of(r: &Record, hit: bool, score: Option<f32>) -> Span {
 /// code exists at all) still returning a full top-5, formatted identically to
 /// a genuine answer.
 ///
-/// STILL PROVISIONAL, from exactly 2 real data points, not a real
-/// distribution: an on-target query scored 0.62-0.66; a totally
-/// out-of-domain one ("pasta carbonara") scored 0.456-0.464 — a real but
-/// narrower gap than an initial guess assumed (an earlier 0.30 failed to flag
-/// the pasta-carbonara case at all). 0.48 sits between them with margin
-/// either way, but the true population spread of correct-match scores is
-/// unknown from 2 points — the Gate-1 recall harness measured a *mean*
-/// correct-match score of 0.605 across 40 real queries, meaning some correct
-/// matches surely score lower than that, and this threshold could be
-/// clipping them into false "low confidence" warnings. Needs a proper
-/// percentile-based calibration (e.g. the 5th percentile of true-positive
-/// scores against a batch of deliberately-nonsense queries) — tracked as a
-/// follow-up, not guessed further here.
-pub const LOW_CONFIDENCE_THRESHOLD: f32 = 0.48;
+/// Calibrated (not guessed) against 40 real labeled queries vs. 16
+/// constructed nonsense/off-topic ones on the jina artifact: real-query
+/// top-1 scores range min 0.495 / 5th-pctile 0.533 / median 0.649; nonsense
+/// top-1 tops out at 0.533. The two distributions overlap slightly (no
+/// perfectly clean split exists), so this is a real precision/recall trade,
+/// not a hard boundary:
+/// * 0.52 (this value) — keeps 98% of real matches, catches 88% of nonsense.
+/// * 0.54 — catches 100% of the constructed nonsense, at the cost of
+///   flagging the weakest ~8% of genuinely-real matches too.
+/// Still provisional in one sense: the nonsense set is 16 constructed
+/// queries, not real traffic — expected to firm up as real low-scoring
+/// queries accumulate. A known hub-function concern (a large, richly
+/// commented symbol scoring high on unrelated queries) turned out to score
+/// ~0.44 on real traffic — well under this threshold, not a separate
+/// problem — but re-check if a *new* hub ever scores 0.6+ on an unrelated
+/// query, which would need its own fix (not a threshold tweak).
+pub const LOW_CONFIDENCE_THRESHOLD: f32 = 0.52;
 
 /// A graph-expand candidate this short is almost always a generic one-liner
 /// (a getter, a trivial formatter) — a real edge, but noise rather than
