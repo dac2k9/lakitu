@@ -613,4 +613,132 @@ mod tests {
             );
         }
     }
+
+    #[derive(Deserialize)]
+    struct LabeledQuery {
+        query: String,
+    }
+
+    /// Real net-positive measurement: for each query in the canonical labeled
+    /// set, run the actual shipped pipeline and compare what it returns
+    /// against the whole-file baseline it replaces — for the SAME files the
+    /// tool's own answer lives in (a like-for-like comparison, not a recall
+    /// measurement). Requires local checkouts of the indexed repos to read
+    /// real file sizes (`LAKITU_TEST_REPO_ROOTS`, "repo=path,repo=path,...").
+    /// Skipped unless every env var is set.
+    #[test]
+    fn net_check_vs_whole_file() {
+        let (Ok(art_dir), Ok(models_dir), Ok(labeled_path), Ok(roots_spec)) = (
+            std::env::var("LAKITU_TEST_ARTIFACT"),
+            std::env::var("LAKITU_TEST_MODELS"),
+            std::env::var("LAKITU_TEST_LABELED_SET"),
+            std::env::var("LAKITU_TEST_REPO_ROOTS"),
+        ) else {
+            eprintln!(
+                "skip: set LAKITU_TEST_ARTIFACT + LAKITU_TEST_MODELS + LAKITU_TEST_LABELED_SET \
+                 + LAKITU_TEST_REPO_ROOTS (\"repo=path,repo=path\") for the net-check"
+            );
+            return;
+        };
+        let roots: BTreeMap<String, String> = roots_spec
+            .split(',')
+            .filter_map(|kv| kv.split_once('='))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+
+        let art = Artifact::load(Path::new(&art_dir)).expect("load artifact");
+        let mut emb = Embedder::load(
+            &Path::new(&models_dir).join("model.onnx"),
+            &Path::new(&models_dir).join("tokenizer.json"),
+        )
+        .expect("load embedder");
+
+        let queries: Vec<String> = std::fs::read_to_string(&labeled_path)
+            .expect("read labeled set")
+            .lines()
+            .filter_map(|l| serde_json::from_str::<LabeledQuery>(l).ok())
+            .map(|q| q.query)
+            .collect();
+        assert!(
+            queries.len() >= 10,
+            "expected the real ~40-query labeled set, got {}",
+            queries.len()
+        );
+
+        // Cache whole-file byte sizes so a file shared across queries/spans is
+        // only stat'd once.
+        let mut file_size_cache: BTreeMap<(String, String), u64> = BTreeMap::new();
+        let mut file_size = |repo: &str, path: &str| -> Option<u64> {
+            let key = (repo.to_string(), path.to_string());
+            if let Some(&s) = file_size_cache.get(&key) {
+                return Some(s);
+            }
+            let root = roots.get(repo)?;
+            let size = std::fs::metadata(Path::new(root).join(path)).ok()?.len();
+            file_size_cache.insert(key, size);
+            Some(size)
+        };
+
+        let (mut total_index_bytes, mut total_whole_file_bytes, mut worse_count) =
+            (0u64, 0u64, 0usize);
+        let mut scored = 0usize;
+        let mut ratio_sum = 0.0; // per-query mean, unweighted — a byte-heavy file
+        let (mut ratio_min, mut ratio_max) = (f64::MAX, f64::MIN); // shouldn't dominate the story
+        for q in &queries {
+            let Ok(result) = query(&art, &mut emb, q, QueryOpts::default(), &BTreeMap::new())
+            else {
+                continue;
+            };
+            if result.spans.is_empty() {
+                continue;
+            }
+            let index_bytes: u64 = result.spans.iter().map(|s| s.body.len() as u64).sum();
+            let mut touched: BTreeSet<(String, String)> = BTreeSet::new();
+            let mut whole_file_bytes = 0u64;
+            let mut resolvable = true;
+            for s in &result.spans {
+                if touched.insert((s.repo.clone(), s.path.clone())) {
+                    match file_size(&s.repo, &s.path) {
+                        Some(sz) => whole_file_bytes += sz,
+                        None => resolvable = false,
+                    }
+                }
+            }
+            if !resolvable {
+                continue; // repo not in LAKITU_TEST_REPO_ROOTS — skip, don't guess
+            }
+            scored += 1;
+            total_index_bytes += index_bytes;
+            total_whole_file_bytes += whole_file_bytes;
+            let ratio = 100.0 * index_bytes as f64 / whole_file_bytes as f64;
+            ratio_sum += ratio;
+            ratio_min = ratio_min.min(ratio);
+            ratio_max = ratio_max.max(ratio);
+            eprintln!("  {index_bytes:>6}B / {whole_file_bytes:>7}B = {ratio:>5.1}%  \"{q}\"");
+            if index_bytes >= whole_file_bytes {
+                worse_count += 1;
+                eprintln!(
+                    "  ⚠ WORSE than whole-file: \"{q}\" — index {index_bytes}B >= whole-file {whole_file_bytes}B"
+                );
+            }
+        }
+
+        assert!(
+            scored > 0,
+            "no query could be scored — check LAKITU_TEST_REPO_ROOTS"
+        );
+        let pct_of_whole_file = 100.0 * total_index_bytes as f64 / total_whole_file_bytes as f64;
+        let ratio_mean = ratio_sum / scored as f64;
+        eprintln!(
+            "net-check: {scored} queries scored, {worse_count} worse-than-whole-file\n\
+             total index bytes:      {total_index_bytes}\n\
+             total whole-file bytes: {total_whole_file_bytes}\n\
+             byte-weighted:  {pct_of_whole_file:.1}% of whole-file cost (~{:.0}% saved)\n\
+             per-query mean: {ratio_mean:.1}% (range {ratio_min:.1}%–{ratio_max:.1}%)\n\
+             rough token estimate (÷4): {} vs {}",
+            100.0 - pct_of_whole_file,
+            total_index_bytes / 4,
+            total_whole_file_bytes / 4,
+        );
+    }
 }
