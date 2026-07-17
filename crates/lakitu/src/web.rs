@@ -44,7 +44,11 @@ pub fn router() -> Router {
 /// rebinding a hostname to `127.0.0.1:<port>` and reading the unauthenticated UI
 /// same-origin. Only the host is checked (the port is irrelevant), and it is
 /// fail-closed: a missing or unparseable `Host` is rejected.
-async fn host_guard(req: Request, next: Next) -> Response {
+///
+/// `pub(crate)` so other unauthenticated-but-loopback-only surfaces (e.g. the
+/// code-index REST endpoint in `server.rs`, mounted the same way as this
+/// router) reuse this exact check instead of a second copy that could drift.
+pub(crate) async fn host_guard(req: Request, next: Next) -> Response {
     let ok = req
         .headers()
         .get(header::HOST)
