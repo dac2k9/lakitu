@@ -18,6 +18,7 @@
 )]
 
 pub mod app;
+pub mod auto_reindex;
 pub mod client;
 pub mod code_index;
 pub mod daemon;

@@ -2185,6 +2185,9 @@ pub(crate) async fn reconcile_shared_tasks(want: Option<String>) -> ReconcileRep
     let mut out = String::new();
     let mut advanced = 0usize;
     let mut notified = 0usize;
+    // Accumulated across the WHOLE pass (not per-task) so a repo watched by
+    // auto_reindex triggers once even if several of its PRs merged this pass.
+    let mut merged_this_pass: Vec<(String, u64)> = Vec::new();
     for t in &tasks {
         if want.as_ref().is_some_and(|w| &t.id != w) {
             continue;
@@ -2297,6 +2300,7 @@ pub(crate) async fn reconcile_shared_tasks(want: Option<String>) -> ReconcileRep
         // Notify the agent(s) registered for each just-merged PR's repo
         // (repo-owner routing; fall back to the task owner if none). The
         // cached "merged" state written above guards against re-notifying.
+        merged_this_pass.extend(newly_merged.iter().cloned());
         for (repo, pr) in &newly_merged {
             let mut targets = fleet::agents_for_repo(repo).await;
             if targets.is_empty() {
@@ -2325,6 +2329,7 @@ pub(crate) async fn reconcile_shared_tasks(want: Option<String>) -> ReconcileRep
             ));
         }
     }
+    crate::auto_reindex::trigger_for_merges(&merged_this_pass);
     if out.is_empty() {
         out.push_str("(no shared-task changes)\n");
     }
